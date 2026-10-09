@@ -8,15 +8,20 @@
 //! unified-memory-architecture (`UMA`) Apple Silicon `SoC` the GPU and
 //! CPU share the same physical pages, so device-wide `total_bytes` is
 //! `sysctl hw.memsize` and the adapter name is the CPU brand string
-//! (`machdep.cpu.brand_string`). Process ownership plays no part: a ledger
-//! read refused by the caller's sandbox is skipped silently in
-//! enumeration (see README Limitations, item 9).
+//! (`machdep.cpu.brand_string`). Process ownership plays no part.
+//!
+//! Enumeration is `proc_listpids`; when the caller's sandbox refuses it
+//! (`EPERM`), `sysctl(KERN_PROC_ALL)`. A ledger read the sandbox refuses
+//! is counted as denied, not dropped, and a name comes from
+//! `proc_pidpath`, or from the kernel's `p_comm` where only that call is
+//! refused (see README Limitations, item 9).
 //!
 //! Source map: `ledger` (per-process graphics resident bytes),
 //! `sysctlbyname` (device totals, name), `proc_listpids` +
-//! `proc_pidpath` (enumeration). No Mach `task_for_pid` is used and no
-//! Apple-framework dependency is required — every call is a libSystem
-//! syscall.
+//! `proc_pidpath` (enumeration, names), `sysctl(KERN_PROC)` (the process
+//! table when libproc is refused; one process's record for its `p_comm`
+//! and for `process_exists`). No Mach `task_for_pid` is used and no
+//! Apple-framework dependency is required.
 //!
 //! Semantic equivalence: `graphics_footprint` is **resident** bytes,
 //! mirroring Windows `WorkingSetSize` (DXGI `CurrentUsage`) and Linux
@@ -34,8 +39,9 @@ use core::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
 use super::kinfo::{
-    CTL_KERN, KERN_PROC, KERN_PROC_PID, KINFO_PROC_SIZE, PathLookup, PidLookup,
-    classify_kern_proc_pid, decide_exists,
+    self, CTL_KERN, KERN_PROC, KERN_PROC_ALL, KERN_PROC_PID, KINFO_PROC_SIZE, KernProcAllAttempt,
+    KinfoRecord, PathLookup, PidLookup, classify_kern_proc_all, classify_kern_proc_pid,
+    decide_exists, parse_kinfo_records,
 };
 
 /// libSystem FFI declarations for the macOS GPU backend.
@@ -75,7 +81,8 @@ mod libsystem_ffi {
         /// arg1 is the target PID reinterpreted as a pointer-sized
         /// integer (kernel convention — see `osfmk/kern/ledger.c`).
         /// Returns `0` on success, `-1` with `errno` set on failure
-        /// (e.g. `EPERM` for a read refused by the caller's sandbox).
+        /// (`EPERM` for a read refused by the caller's sandbox, `ESRCH`
+        /// for a PID that exited).
         pub(super) unsafe fn ledger(
             cmd: i32,
             arg1: *mut c_void,
@@ -100,7 +107,8 @@ mod libsystem_ffi {
         ///
         /// See: `<sys/sysctl.h>`. The MIB form, distinct from
         /// `sysctlbyname`: `name` points at `namelen` integers (for a
-        /// process record, `CTL_KERN, KERN_PROC, KERN_PROC_PID, pid`).
+        /// process record, `CTL_KERN, KERN_PROC, KERN_PROC_PID, pid`; for
+        /// the process table, `CTL_KERN, KERN_PROC, KERN_PROC_ALL`).
         /// `oldp`/`oldlenp` form the standard in/out buffer pair;
         /// `newp`/`newlen` are null/zero for read-only queries. Returns
         /// `0` on success, `-1` with `errno` set on failure.
@@ -119,7 +127,10 @@ mod libsystem_ffi {
         /// `typeinfo = 0`, fills `buffer` with `i32` PIDs and returns
         /// the number of bytes written. Calling with
         /// `buffer = NULL, buffersize = 0` returns the buffer size in
-        /// bytes the kernel would need (i.e. `4 * pid_count`).
+        /// bytes the kernel suggests: `(nprocs + 20) * sizeof(int)`, the
+        /// process count plus 20 spare slots (XNU `bsd/kern/proc_info.c`);
+        /// the fill returns the bytes it wrote, `4 * pid_count`. Returns `0`
+        /// with `errno` `EPERM` when the caller's sandbox refuses it.
         pub(super) unsafe fn proc_listpids(
             type_: u32,
             typeinfo: u32,
@@ -131,8 +142,11 @@ mod libsystem_ffi {
         ///
         /// See: `<libproc.h>`. Writes a NUL-terminated path into
         /// `buffer`. Returns the path length on success (excluding
-        /// NUL), or `0` on failure (e.g. process exited, or the call
-        /// refused by the caller's sandbox).
+        /// NUL), or `0` on failure with `errno` set: `ESRCH` for a PID
+        /// that names no process, `EPERM` for a call the caller's sandbox
+        /// refuses. The kernel looks the PID up before it checks the
+        /// sandbox (XNU `bsd/kern/proc_info.c`), so a missing PID reads
+        /// `ESRCH` even inside a sandbox.
         pub(super) unsafe fn proc_pidpath(pid: i32, buffer: *mut c_void, buffersize: u32) -> i32;
     }
 }
@@ -469,28 +483,60 @@ fn resolve_graphics_footprint_index() -> Option<i32> {
     None
 }
 
+/// What one ledger read of a PID's `graphics_footprint` said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FootprintRead {
+    /// The balance, in bytes (zero included).
+    Bytes(u64),
+    /// The caller's sandbox refused the read (`EPERM`).
+    Denied,
+    /// The process exited (`ESRCH`); it holds nothing that can be listed.
+    Gone,
+    /// The read failed, and the cause is neither a refusal nor the process
+    /// exiting: any other `errno` or none, an empty entry array, an index
+    /// past it, or a negative balance.
+    Failed,
+    /// The `graphics_footprint` entry index did not resolve, so no PID can
+    /// be read.
+    Unavailable,
+}
+
+/// Classify the `errno` of a failed ledger read.
+///
+/// Only a refusal (`EPERM`) is `Denied` and only `ESRCH` (the process
+/// exited) is `Gone`. Every other `errno` and a missing one are `Failed`, so
+/// a PID is never counted as protected, or as gone, for any other reason.
+const fn footprint_from_errno(errno: Option<i32>) -> FootprintRead {
+    match errno {
+        Some(kinfo::EPERM) => FootprintRead::Denied,
+        Some(kinfo::ESRCH) => FootprintRead::Gone,
+        _ => FootprintRead::Failed,
+    }
+}
+
 /// Read `graphics_footprint` (resident GPU-attributed bytes) for `pid`.
 ///
-/// Calls `ledger(LEDGER_ENTRY_INFO_V2, pid, buf, &count)` and reads the
-/// `lei_balance` of the resolved entry index. Returns `None` if the
-/// syscall fails (e.g. a read refused by the caller's sandbox →
-/// `EPERM`, or PID has exited → `ESRCH`), or the index has not yet been
-/// resolvable.
+/// Resolves the entry index once, then calls
+/// `ledger(LEDGER_ENTRY_INFO_V2, pid, buf, &count)` and reads the
+/// `lei_balance` of that entry. `Unavailable` when the index did not
+/// resolve, with no syscall. A failed call goes through
+/// [`footprint_from_errno`]: `EPERM`, a read refused by the caller's
+/// sandbox, is `Denied`; `ESRCH`, the process having exited, is `Gone`;
+/// any other `errno` is `Failed`. A success with an empty entry array, an
+/// index past it and a negative balance (not physically meaningful for a
+/// bytes-unit entry) are `Failed` too.
 ///
 /// `graphics_footprint` tracks resident Metal-written pages on Apple
 /// Silicon UMA: writing every byte of a 256 MiB `MTLBuffer` increases
 /// the entry by exactly 256 MiB (resident-bytes semantics, the macOS
 /// analogue of Windows `WorkingSetSize` and Linux `VmRSS`).
 #[allow(unsafe_code)]
-fn read_graphics_footprint(pid: i32) -> Option<u64> {
+fn read_graphics_footprint(pid: i32) -> FootprintRead {
     let idx =
         *GRAPHICS_FOOTPRINT_INDEX.get_or_init(|| resolve_graphics_footprint_index().unwrap_or(-1));
-    if idx < 0 {
-        return None;
-    }
-    // CAST: i32 → usize, `idx >= 0` was just checked.
-    #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-    let idx_usize = idx as usize;
+    let Ok(idx_usize) = usize::try_from(idx) else {
+        return FootprintRead::Unavailable;
+    };
 
     // Allocate one row per kernel entry. The kernel writes
     // `LEDGER_TEMPLATE_BUF_CAP` rows max; we size the buffer the same
@@ -516,8 +562,9 @@ fn read_graphics_footprint(pid: i32) -> Option<u64> {
     let pid_as_ptr = pid as usize as *mut c_void;
     // SAFETY: arg1 is the PID encoded as a pointer; arg2 is the
     // entry-array buffer; arg3 is the count in/out. A read refused by
-    // the caller's sandbox surfaces as a non-zero return; PID-exited
-    // surfaces as ESRCH. Both are folded into `None` below.
+    // the caller's sandbox returns -1 with `EPERM`; a PID that exited
+    // returns -1 with `ESRCH`. `errno` is read below, before anything
+    // else runs.
     let rc = unsafe {
         libsystem_ffi::ledger(
             LEDGER_ENTRY_INFO_V2,
@@ -526,27 +573,24 @@ fn read_graphics_footprint(pid: i32) -> Option<u64> {
             (&raw mut count).cast::<c_void>(),
         )
     };
-    if rc != 0 || count <= 0 {
-        return None;
+    if rc != 0 {
+        return footprint_from_errno(last_errno());
+    }
+    if count <= 0 {
+        return FootprintRead::Failed;
     }
     // CAST: i32 → usize, `count > 0` just checked.
     #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
     let returned = (count as usize).min(LEDGER_TEMPLATE_BUF_CAP);
     if idx_usize >= returned {
-        return None;
+        return FootprintRead::Failed;
     }
     // Use `.get()` to avoid panic-prone indexing; `idx_usize < returned`
-    // already checked, so the `?` short-circuit is defensive only.
-    let balance = buf.get(idx_usize)?.lei_balance;
-    if balance < 0 {
-        // Negative balances are not physically meaningful for a
-        // bytes-unit entry; surface as absent rather than wrapping.
-        None
-    } else {
-        // CAST: i64 → u64, `balance >= 0` just checked.
-        #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-        Some(balance as u64)
-    }
+    // already checked, so the `else` is defensive only.
+    let Some(entry) = buf.get(idx_usize) else {
+        return FootprintRead::Failed;
+    };
+    u64::try_from(entry.lei_balance).map_or(FootprintRead::Failed, FootprintRead::Bytes)
 }
 
 /// Run a single Metal device query for `idx`.
@@ -622,114 +666,18 @@ pub(super) fn process_gpu_info(device_index: u32) -> Option<crate::ProcessGpuInf
         return None;
     }
     let self_pid = process_self_pid();
-    let used_bytes = read_graphics_footprint(self_pid)?;
+    let used_bytes = match read_graphics_footprint(self_pid) {
+        FootprintRead::Bytes(bytes) => bytes,
+        FootprintRead::Denied
+        | FootprintRead::Gone
+        | FootprintRead::Failed
+        | FootprintRead::Unavailable => return None,
+    };
     Some(crate::ProcessGpuInfo {
         used_bytes,
         is_per_process: true,
         source: crate::GpuQuerySource::Metal,
     })
-}
-
-/// Enumerate every process holding GPU memory on `device_index` that
-/// the caller's sandbox lets it read. PIDs whose ledger read is refused
-/// by the caller's sandbox are skipped silently, as are PIDs with a
-/// zero `graphics_footprint` balance (mirrors NVML's per-process filter
-/// on Linux).
-///
-/// Two-phase `proc_listpids`: query the buffer size first, then fill.
-/// PID count may grow between the two calls; the iteration is capped
-/// at the buffer's filled length to remain safe.
-#[allow(unsafe_code)]
-pub(super) fn list_compute_processes(device_index: u32) -> Option<Vec<crate::GpuProcessEntry>> {
-    if device_index != 0 {
-        return None;
-    }
-
-    // Phase 1 — size probe: `buffer = NULL, buffersize = 0` returns
-    // the byte count the kernel would write.
-    // SAFETY: `PROC_ALL_PIDS` is a documented selector; `typeinfo = 0`
-    // means "any predicate"; `buffer = NULL`/`buffersize = 0` is the
-    // documented size-probe convention.
-    let size_bytes =
-        unsafe { libsystem_ffi::proc_listpids(PROC_ALL_PIDS, 0, core::ptr::null_mut(), 0) };
-    if size_bytes <= 0 {
-        return None;
-    }
-    // CAST: i32 → usize, `size_bytes > 0` just checked. `size_bytes`
-    // is bounded by the kernel's max PID count × 4; comfortably fits.
-    #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-    let size_usize = size_bytes as usize;
-    let pid_count = size_usize / size_of::<i32>();
-    if pid_count == 0 {
-        return None;
-    }
-
-    // Phase 2 — fill. Allocate `pid_count` i32 slots; the kernel may
-    // see a slightly larger live PID count by the time it runs but
-    // will not exceed the byte budget we pass.
-    let mut pids: Vec<i32> = vec![0_i32; pid_count];
-    // CAST: usize → i32, `size_usize == pid_count * 4` and was just
-    // computed from the kernel's own i32 return; round-trips safely.
-    #[allow(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap
-    )]
-    let cap_bytes = (pid_count * size_of::<i32>()) as i32;
-    // SAFETY: `pids.as_mut_ptr` is valid for `pid_count *
-    // size_of::<i32>()` bytes (matches `cap_bytes`). The kernel
-    // writes up to `cap_bytes` bytes worth of PIDs and returns the
-    // actual byte count written.
-    let written_bytes = unsafe {
-        libsystem_ffi::proc_listpids(
-            PROC_ALL_PIDS,
-            0,
-            pids.as_mut_ptr().cast::<c_void>(),
-            cap_bytes,
-        )
-    };
-    if written_bytes <= 0 {
-        return None;
-    }
-    // CAST: i32 → usize, `written_bytes > 0` just checked.
-    #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-    let written_usize = (written_bytes as usize).min(size_usize);
-    let written_pids = written_usize / size_of::<i32>();
-
-    let mut out: Vec<crate::GpuProcessEntry> = Vec::new();
-    // Iterate up to the buffer's actual filled length; cap by
-    // `pid_count` defensively against any kernel-side count growth.
-    for &pid in pids.iter().take(written_pids) {
-        if pid <= 0 {
-            continue;
-        }
-        let Some(used) = read_graphics_footprint(pid) else {
-            // A read refused by the caller's sandbox, ESRCH (exited),
-            // or absent index — all surface as `None` here and are
-            // silently skipped.
-            continue;
-        };
-        if used == 0 {
-            continue;
-        }
-        let name = read_proc_pidpath_basename(pid);
-        // CAST: i32 → u32, `pid > 0` just checked; PIDs are
-        // non-negative on macOS.
-        #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-        let pid_u32 = pid as u32;
-        out.push(crate::GpuProcessEntry {
-            pid: pid_u32,
-            name,
-            used_bytes: used,
-            // Apple Silicon UMA is a single physical pool — there is
-            // no separate shared budget to spill into (see
-            // GpuProcessEntry docs).
-            shared_used_bytes: 0,
-            source: crate::GpuQuerySource::Metal,
-        });
-    }
-
-    Some(out)
 }
 
 /// Whether `pid` names a running process: `proc_pidpath` first (a path
@@ -798,12 +746,7 @@ fn kern_proc_pid_raw(pid: i32) -> (i32, i32, [u8; KINFO_PROC_SIZE], usize) {
         )
     };
     // Read `errno` before any other call can clobber it.
-    let errno = if rc == 0 {
-        0
-    } else {
-        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-    };
-    (rc, errno, buf, len)
+    (rc, errno_after(rc), buf, len)
 }
 
 /// What `sysctl` `KERN_PROC_PID` says about `pid`.
@@ -814,11 +757,11 @@ fn kern_proc_pid_lookup(pid: i32) -> PidLookup {
 
 /// Resolve `pid`'s executable basename via `proc_pidpath`.
 ///
-/// Returns `None` on syscall failure (process exited, a call refused
-/// by the caller's sandbox, or path-decoding failure). The basename is
-/// the final `/`-separated component of the full executable path.
+/// The basename is the final `/`-separated component of the full
+/// executable path. `Err` carries the `errno` a failed call left, or 0 for
+/// a path that is not UTF-8 or has an empty basename.
 #[allow(unsafe_code)]
-fn read_proc_pidpath_basename(pid: i32) -> Option<String> {
+fn read_proc_pidpath_basename(pid: i32) -> Result<String, i32> {
     let mut buf: [u8; PROC_PIDPATHINFO_MAXSIZE] = [0; PROC_PIDPATHINFO_MAXSIZE];
     // CAST: usize → u32, `PROC_PIDPATHINFO_MAXSIZE` is 4096; fits.
     #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
@@ -826,39 +769,457 @@ fn read_proc_pidpath_basename(pid: i32) -> Option<String> {
     // SAFETY: `buf.as_mut_ptr` is valid for `PROC_PIDPATHINFO_MAXSIZE`
     // bytes (its declared length). The kernel writes a NUL-terminated
     // path of at most `cap_u32` bytes and returns the length excluding
-    // the NUL. PID validity is handled by the kernel; a stale PID, or
-    // one refused by the caller's sandbox, returns 0.
+    // the NUL, or 0 with `errno` set (`ESRCH` for a stale PID, `EPERM`
+    // for one refused by the caller's sandbox). PID validity is the
+    // kernel's to judge.
     let len =
         unsafe { libsystem_ffi::proc_pidpath(pid, buf.as_mut_ptr().cast::<c_void>(), cap_u32) };
     if len <= 0 {
-        return None;
+        return Err(last_errno().unwrap_or(0));
     }
     // CAST: i32 → usize, `len > 0` just checked and bounded by
     // `cap_u32`.
     #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
     let len_usize = (len as usize).min(PROC_PIDPATHINFO_MAXSIZE);
     // Take only the bytes the kernel wrote (excludes terminator).
-    let path_bytes = buf.get(..len_usize)?;
-    // BORROW: `from_utf8` borrows; `to_owned` produces the returned
-    // `String` so the stack buffer can be dropped.
-    let path_str = core::str::from_utf8(path_bytes).ok()?.to_owned();
+    let path_bytes = buf.get(..len_usize).ok_or(0)?;
+    let path_str = core::str::from_utf8(path_bytes).map_err(|_| 0)?;
     // Extract basename — the substring after the final '/'.
-    let basename = path_str.rsplit('/').next().unwrap_or(&path_str);
+    let basename = path_str.rsplit('/').next().unwrap_or(path_str);
     if basename.is_empty() {
-        None
+        Err(0)
     } else {
-        // BORROW: `to_owned` — `basename` is borrowed from `path_str`
-        // which is dropped at function return.
-        Some(basename.to_owned())
+        // BORROW: `to_owned` — `basename` is borrowed from the stack
+        // buffer, which is dropped at function return.
+        Ok(basename.to_owned())
     }
+}
+
+/// A process's name: `proc_pidpath`'s basename when it answered, else
+/// `comm()` when the caller's sandbox refused it (`EPERM`).
+///
+/// `comm` is never called after a path, and never for a process that is
+/// gone or whose failure is not a refusal. A name therefore comes from
+/// `p_comm` only where `proc_pidpath` is refused, so it does not flip
+/// between the two sources from one sample to the next.
+fn name_after_pidpath(
+    read: Result<String, i32>,
+    comm: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match read {
+        Ok(name) => Some(name),
+        Err(kinfo::EPERM) => comm(),
+        Err(_) => None,
+    }
+}
+
+/// The name held in a `p_comm` buffer: the bytes before the first NUL.
+///
+/// `None` when that is empty or not UTF-8. The kernel cuts `p_comm` at 16
+/// bytes, which can fall inside a multibyte character; the valid prefix
+/// before the cut is the name then. Only a name of exactly 16 bytes can
+/// have been cut, so a shorter one that ends in an incomplete character is
+/// not a name. A name that is valid UTF-8 is returned whole, including a
+/// full 16-byte one.
+fn comm_to_name(comm: &[u8]) -> Option<String> {
+    let bytes = comm.split(|&byte| byte == 0).next().unwrap_or(comm);
+    let name = match core::str::from_utf8(bytes) {
+        Ok(name) => name,
+        // An incomplete last sequence at 16 bytes is the kernel's cut; any
+        // other invalid input is not a name.
+        Err(e) if e.error_len().is_none() && bytes.len() == kinfo::P_COMM_SIZE - 1 => {
+            core::str::from_utf8(bytes.get(..e.valid_up_to())?).ok()?
+        }
+        Err(_) => return None,
+    };
+    // BORROW: `to_owned` copies the name out of the caller's buffer.
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// What `proc_listpids` said.
+#[derive(Debug, PartialEq, Eq)]
+enum LibprocPids {
+    /// The PIDs it listed, at least one.
+    Pids(Vec<i32>),
+    /// The caller's sandbox refused the call (`EPERM`).
+    Refused,
+    /// The call failed for any other reason, or listed no PID.
+    Failed,
+}
+
+/// Classify one `proc_listpids` result: the byte count it `written`
+/// (`<= 0` on failure), the `errno` it left and the `pids` it listed.
+///
+/// Only `EPERM` is a refusal: `ESRCH`, `ENOMEM` and the rest are a
+/// failure, so a transient libproc error never reads as a sandbox. A
+/// success that lists no PID is a failure too, not an empty process table.
+fn libproc_outcome(written: i32, errno: Option<i32>, pids: Vec<i32>) -> LibprocPids {
+    if written <= 0 {
+        return if errno == Some(kinfo::EPERM) {
+            LibprocPids::Refused
+        } else {
+            LibprocPids::Failed
+        };
+    }
+    if pids.is_empty() {
+        LibprocPids::Failed
+    } else {
+        LibprocPids::Pids(pids)
+    }
+}
+
+/// The `errno` of the failed call just made.
+///
+/// Call it first after the failing FFI call, before anything else can
+/// overwrite `errno`.
+fn last_errno() -> Option<i32> {
+    std::io::Error::last_os_error().raw_os_error()
+}
+
+/// The `errno` for `classify_*`, which takes it as an `i32`: `0` when the
+/// call just made returned `rc == 0`, else the `errno` it left, `0` when it
+/// left none.
+///
+/// Call it first after the `sysctl`, before anything else can overwrite
+/// `errno`.
+fn errno_after(rc: i32) -> i32 {
+    if rc == 0 {
+        0
+    } else {
+        last_errno().unwrap_or(0)
+    }
+}
+
+/// List every PID with `proc_listpids`.
+///
+/// Two phases: query the buffer size first, then fill. The PID count may
+/// grow between the two calls; the iteration is capped at the buffer's
+/// filled length. `errno` is read right after each failed call and goes
+/// through [`libproc_outcome`].
+#[allow(unsafe_code)]
+fn list_libproc_pids() -> LibprocPids {
+    // Phase 1 — size probe: `buffer = NULL, buffersize = 0` returns
+    // the byte count the kernel would write.
+    // SAFETY: `PROC_ALL_PIDS` is a documented selector; `typeinfo = 0`
+    // means "any predicate"; `buffer = NULL`/`buffersize = 0` is the
+    // documented size-probe convention.
+    let size_bytes =
+        unsafe { libsystem_ffi::proc_listpids(PROC_ALL_PIDS, 0, core::ptr::null_mut(), 0) };
+    if size_bytes <= 0 {
+        return libproc_outcome(size_bytes, last_errno(), Vec::new());
+    }
+    let Ok(size_usize) = usize::try_from(size_bytes) else {
+        return LibprocPids::Failed;
+    };
+    let pid_count = size_usize / size_of::<i32>();
+    if pid_count == 0 {
+        return LibprocPids::Failed;
+    }
+
+    // Phase 2 — fill. Allocate `pid_count` i32 slots; the kernel may
+    // see a slightly larger live PID count by the time it runs but
+    // will not exceed the byte budget we pass.
+    let mut pids: Vec<i32> = vec![0_i32; pid_count];
+    // `pid_count * 4` is at most `size_bytes`, the kernel's own i32.
+    let Ok(cap_bytes) = i32::try_from(pid_count * size_of::<i32>()) else {
+        return LibprocPids::Failed;
+    };
+    // SAFETY: `pids.as_mut_ptr` is valid for `pid_count *
+    // size_of::<i32>()` bytes (matches `cap_bytes`). The kernel
+    // writes up to `cap_bytes` bytes worth of PIDs and returns the
+    // actual byte count written.
+    let written_bytes = unsafe {
+        libsystem_ffi::proc_listpids(
+            PROC_ALL_PIDS,
+            0,
+            pids.as_mut_ptr().cast::<c_void>(),
+            cap_bytes,
+        )
+    };
+    if written_bytes <= 0 {
+        return libproc_outcome(written_bytes, last_errno(), Vec::new());
+    }
+    let Ok(written_usize) = usize::try_from(written_bytes) else {
+        return LibprocPids::Failed;
+    };
+    let written_usize = written_usize.min(size_usize);
+    // Keep only the slots the kernel filled.
+    pids.truncate(written_usize / size_of::<i32>());
+    libproc_outcome(written_bytes, None, pids)
+}
+
+/// How many probe-and-fill attempts [`list_kern_proc_all`] makes before it
+/// gives up on a process table that keeps outgrowing its buffer.
+const KERN_PROC_ALL_MAX_ATTEMPTS: usize = 4;
+
+/// The divisor of the slack [`kern_proc_all_buffer_len`] adds to the probed
+/// length: one `KERN_PROC_ALL_SLACK_DIVISOR`th of it.
+const KERN_PROC_ALL_SLACK_DIVISOR: usize = 8;
+
+/// The buffer length for the `KERN_PROC_ALL` fill, given the `probed`
+/// length: `probed` plus `probed / KERN_PROC_ALL_SLACK_DIVISOR` slack,
+/// rounded up to a whole number of `KINFO_PROC_SIZE` records and never
+/// zero.
+///
+/// The kernel's probe already counts five spare records; the slack covers
+/// a table that grows faster than that between the probe and the fill.
+fn kern_proc_all_buffer_len(probed: usize) -> usize {
+    probed
+        .saturating_add(probed / KERN_PROC_ALL_SLACK_DIVISOR)
+        .div_ceil(KINFO_PROC_SIZE)
+        .max(1)
+        .saturating_mul(KINFO_PROC_SIZE)
+}
+
+/// List every process with `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_ALL)`.
+///
+/// The records come through [`parse_kinfo_records`], the parser
+/// `KERN_PROC_PID` uses. Each attempt is a probe with a null buffer, which
+/// gives the length, then a fill into a buffer of [`kern_proc_all_buffer_len`]
+/// bytes, judged by [`classify_kern_proc_all`]. A fill it calls `Retry` is
+/// tried again, up to `KERN_PROC_ALL_MAX_ATTEMPTS` attempts in all; one it
+/// calls `Failed`, a refusal included, is `None`.
+#[allow(unsafe_code)]
+fn list_kern_proc_all() -> Option<Vec<KinfoRecord>> {
+    let mut mib = [CTL_KERN, KERN_PROC, KERN_PROC_ALL];
+    // CAST: usize → u32, a 3-element MIB; fits.
+    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+    let namelen = mib.len() as u32;
+    for _ in 0..KERN_PROC_ALL_MAX_ATTEMPTS {
+        let mut probed: usize = 0;
+        // SAFETY: `mib` holds the `namelen` ints; `oldp` is null, which
+        // asks the kernel to write the length it would return into
+        // `probed`, a live `usize`, and to copy nothing; `newp`/`newlen`
+        // are null/zero, a read-only query.
+        let rc = unsafe {
+            libsystem_ffi::sysctl(
+                mib.as_mut_ptr(),
+                namelen,
+                core::ptr::null_mut(),
+                &raw mut probed,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let mut buf = vec![0_u8; kern_proc_all_buffer_len(probed)];
+        let mut len = buf.len();
+        // SAFETY: `mib` holds the `namelen` ints; `buf` is valid for
+        // `len` bytes, and `len` is in/out (the kernel writes back how
+        // many bytes it stored, never more than it was given);
+        // `newp`/`newlen` are null/zero, a read-only query.
+        let rc = unsafe {
+            libsystem_ffi::sysctl(
+                mib.as_mut_ptr(),
+                namelen,
+                buf.as_mut_ptr().cast::<c_void>(),
+                &raw mut len,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        // Read `errno` before any other call can clobber it.
+        match classify_kern_proc_all(rc, errno_after(rc), &buf, len) {
+            KernProcAllAttempt::Records(records) => return Some(records),
+            // EXPLICIT: the table outgrew the buffer; probe and fill again.
+            KernProcAllAttempt::Retry => {}
+            KernProcAllAttempt::Failed => return None,
+        }
+    }
+    None
+}
+
+/// Trust a `KERN_PROC_ALL` listing only when `self_lookup` shows the
+/// kernel's `kinfo_proc` is 648 bytes.
+///
+/// A kernel with another record size answers the probe-sized fill with
+/// whole records of its own size and `rc` 0, and `parse_kinfo_records`
+/// rejects that only when the total is not a multiple of 648. The caller's
+/// own `KERN_PROC_PID` lookup is `PidLookup::Record` only for exactly one
+/// 648-byte record that names it, so any other answer distrusts the
+/// listing. A missing or empty listing is `None` without asking
+/// `self_lookup`, since the caller is always in the table.
+fn trust_kinfo_listing(
+    listing: Option<Vec<KinfoRecord>>,
+    self_lookup: impl FnOnce() -> PidLookup,
+) -> Option<Vec<KinfoRecord>> {
+    let records = listing.filter(|records| !records.is_empty())?;
+    matches!(self_lookup(), PidLookup::Record).then_some(records)
+}
+
+/// Enumerate PIDs: `proc_listpids` first; `sysctl(KERN_PROC_ALL)` only when
+/// libproc says the caller's sandbox refused it. `None` when no enumeration
+/// worked.
+fn list_pids() -> Option<Vec<i32>> {
+    let self_lookup = || kern_proc_pid_lookup(process_self_pid());
+    match list_libproc_pids() {
+        LibprocPids::Pids(pids) => Some(pids),
+        LibprocPids::Refused => {
+            let records = trust_kinfo_listing(list_kern_proc_all(), self_lookup)?;
+            Some(records.into_iter().map(|record| record.pid).collect())
+        }
+        LibprocPids::Failed => None,
+    }
+}
+
+/// The `p_comm` bytes of `pid`, from its `KERN_PROC_PID` record.
+///
+/// The source of a name where `proc_pidpath` was refused. `None` unless
+/// [`classify_kern_proc_pid`] says the call is a record for `pid`.
+fn kern_proc_pid_comm(pid: i32) -> Option<Vec<u8>> {
+    let (rc, errno, buf, len) = kern_proc_pid_raw(pid);
+    if classify_kern_proc_pid(rc, errno, &buf, len, pid) != PidLookup::Record {
+        return None;
+    }
+    let record = parse_kinfo_records(buf.get(..len)?)?.into_iter().next()?;
+    Some(record.comm)
+}
+
+/// What reading every listed PID's ledger found.
+#[derive(Debug, PartialEq, Eq)]
+struct ReadTally {
+    /// `(pid, bytes)` for every PID holding a non-zero balance, the
+    /// caller's own included, in enumeration order.
+    found: Vec<(i32, u64)>,
+    /// The PIDs whose read the sandbox refused, in enumeration order. Not
+    /// the caller and not a PID that is gone.
+    denied: Vec<u32>,
+    /// How many PIDs other than the caller were read, zero balances
+    /// included.
+    others_read: usize,
+}
+
+/// Fold per-PID reads into a [`ReadTally`]. `None` when a read is
+/// `Unavailable`: nothing can be read at all. `None` too when no other
+/// process was read, none was refused and at least one read, the caller's
+/// own included, `Failed`: nothing says why, so the list is not an answer.
+///
+/// The caller's own read adds its entry but never counts as another process
+/// read, and its own denial is not listed.
+fn tally_reads(
+    self_pid: i32,
+    reads: impl Iterator<Item = (i32, FootprintRead)>,
+) -> Option<ReadTally> {
+    let mut tally = ReadTally {
+        found: Vec::new(),
+        denied: Vec::new(),
+        others_read: 0,
+    };
+    let mut failed = 0_usize;
+    // EXPLICIT: a stateful fold, not an iterator chain: the caller's own read
+    // counts differently from the others, and `Unavailable`, like the failed
+    // count, abandons the tally.
+    for (pid, read) in reads {
+        match read {
+            FootprintRead::Unavailable => return None,
+            FootprintRead::Bytes(bytes) => {
+                if pid != self_pid {
+                    tally.others_read += 1;
+                }
+                if bytes > 0 {
+                    tally.found.push((pid, bytes));
+                }
+            }
+            FootprintRead::Denied => {
+                if pid != self_pid {
+                    tally.denied.extend(u32::try_from(pid).ok());
+                }
+            }
+            // EXPLICIT: the process is gone; it is neither read nor denied.
+            FootprintRead::Gone => {}
+            FootprintRead::Failed => failed += 1,
+        }
+    }
+    if tally.others_read == 0 && tally.denied.is_empty() && failed > 0 {
+        return None;
+    }
+    Some(tally)
+}
+
+/// The processes holding GPU memory, and what the caller's sandbox kept
+/// from it.
+pub(super) struct MetalProcessList {
+    /// One row per PID holding GPU memory, the caller's own included.
+    pub(super) entries: Vec<crate::GpuProcessEntry>,
+    /// The PIDs whose ledger read the sandbox refused, in enumeration
+    /// order, excluding the caller, gone PIDs and PIDs that are not
+    /// positive.
+    pub(super) denied_pids: Vec<u32>,
+    /// How many PIDs other than the caller were read, zero balances
+    /// included.
+    pub(super) others_read: usize,
+}
+
+/// Enumerate every process on `device_index` and read each one's
+/// `graphics_footprint`: every process the caller's sandbox lets it read.
+///
+/// `None` when:
+/// - `device_index` is not 0;
+/// - `proc_listpids` fails without being refused: an `errno` other than
+///   `EPERM`, no `errno`, a size too small for one PID, or a success that
+///   lists no PID (`sysctl` is not tried);
+/// - `proc_listpids` is refused and `sysctl(KERN_PROC_ALL)` is refused,
+///   fails, or gives a listing the record-size guard distrusts;
+/// - the ledger entry index did not resolve;
+/// - no other process was read, none was refused and at least one failed.
+///
+/// A PID whose read is refused is in `denied_pids`; a PID that is gone, or
+/// holds a zero balance, makes no row (mirrors NVML's per-process filter on
+/// Linux); a PID that is not positive is skipped before its read. Names
+/// come from [`name_after_pidpath`], with `p_comm` as the fallback. The
+/// caller decides from `others_read` and `denied_pids` whether the list is
+/// readable at all.
+pub(super) fn list_processes(device_index: u32) -> Option<MetalProcessList> {
+    if device_index != 0 {
+        return None;
+    }
+    let pids = list_pids()?;
+    let tally = tally_reads(
+        process_self_pid(),
+        pids.into_iter()
+            .filter(|&pid| pid > 0)
+            .map(|pid| (pid, read_graphics_footprint(pid))),
+    )?;
+    let mut entries: Vec<crate::GpuProcessEntry> = Vec::new();
+    for &(pid, used_bytes) in &tally.found {
+        let Ok(pid_u32) = u32::try_from(pid) else {
+            continue;
+        };
+        let name = name_after_pidpath(read_proc_pidpath_basename(pid), || {
+            kern_proc_pid_comm(pid).and_then(|comm| comm_to_name(&comm))
+        });
+        entries.push(crate::GpuProcessEntry {
+            pid: pid_u32,
+            name,
+            used_bytes,
+            // Apple Silicon UMA is a single physical pool — there is
+            // no separate shared budget to spill into (see
+            // GpuProcessEntry docs).
+            shared_used_bytes: 0,
+            source: crate::GpuQuerySource::Metal,
+        });
+    }
+    Some(MetalProcessList {
+        entries,
+        denied_pids: tally.denied,
+        others_read: tally.others_read,
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::gpu::kinfo::{self, parse_kinfo_records};
+    use crate::gpu::kinfo::parse_kinfo_records;
+    use std::io::Write as _;
     use std::os::unix::ffi::OsStrExt;
+
+    /// This process's PID.
+    fn me() -> i32 {
+        i32::try_from(std::process::id()).unwrap()
+    }
 
     /// The first 16 bytes (`MAXCOMLEN`) of a path's file name.
     fn comm_of(path: &std::path::Path) -> Vec<u8> {
@@ -868,6 +1229,23 @@ mod tests {
         name.get(..name.len().min(kinfo::P_COMM_SIZE - 1))
             .unwrap()
             .to_vec()
+    }
+
+    /// Assert `comm` is this process's `p_comm`: the name `execve` was
+    /// given, which is the executable's file name or `argv[0]`'s basename.
+    fn assert_is_my_comm(comm: &[u8]) {
+        let exe = comm_of(&std::env::current_exe().unwrap());
+        let argv0 = std::env::args_os()
+            .next()
+            .map(|a| comm_of(std::path::Path::new(&a)))
+            .unwrap_or_default();
+        assert!(
+            comm == exe || comm == argv0,
+            "comm {:?}, exe {:?}, argv[0] {:?}",
+            String::from_utf8_lossy(comm),
+            String::from_utf8_lossy(&exe),
+            String::from_utf8_lossy(&argv0)
+        );
     }
 
     /// Anchors the 648-byte layout on the running kernel: synthetic
@@ -884,19 +1262,241 @@ mod tests {
         assert_eq!(records.len(), 1, "{records:?}");
         let record = records.first().unwrap();
         assert_eq!(u32::try_from(record.pid).ok(), Some(me));
-        // `p_comm` is the name `execve` was given: the executable's file
-        // name, or `argv[0]`'s basename.
-        let exe = comm_of(&std::env::current_exe().unwrap());
-        let argv0 = std::env::args_os()
-            .next()
-            .map(|a| comm_of(std::path::Path::new(&a)))
-            .unwrap_or_default();
+        assert_is_my_comm(&record.comm);
+    }
+
+    #[test]
+    fn list_pids_holds_this_process() {
+        let pids = list_pids().unwrap();
         assert!(
-            record.comm == exe || record.comm == argv0,
-            "comm {:?}, exe {:?}, argv[0] {:?}",
-            String::from_utf8_lossy(&record.comm),
-            String::from_utf8_lossy(&exe),
-            String::from_utf8_lossy(&argv0)
+            pids.contains(&me()),
+            "{} PIDs, none for this process",
+            pids.len()
         );
+    }
+
+    #[test]
+    fn footprint_from_errno_only_eperm_is_denied() {
+        // Literals, so a wrong `kinfo::EPERM` or `kinfo::ESRCH` fails here.
+        // `ESRCH` is `Gone`; `EINVAL`, `ENOMEM` and no `errno` are `Failed`,
+        // never `Denied`.
+        assert_eq!(footprint_from_errno(Some(1)), FootprintRead::Denied);
+        assert_eq!(footprint_from_errno(Some(3)), FootprintRead::Gone);
+        for errno in [Some(22), Some(12), None] {
+            assert_eq!(
+                footprint_from_errno(errno),
+                FootprintRead::Failed,
+                "errno {errno:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tally_reads_counts_every_read_pid_and_lists_a_row_for_a_non_zero_balance() {
+        let tally = tally_reads(
+            me(),
+            [
+                (1, FootprintRead::Gone),
+                (3, FootprintRead::Bytes(0)),
+                (4, FootprintRead::Bytes(7)),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        // A gone PID is neither read nor denied, and a zero balance is read
+        // but makes no row.
+        assert_eq!(tally.found, vec![(4, 7)]);
+        assert_eq!(tally.others_read, 2);
+        assert!(tally.denied.is_empty(), "{:?}", tally.denied);
+    }
+
+    #[test]
+    fn tally_reads_does_not_count_the_caller_as_denied_or_as_another_process() {
+        let tally = tally_reads(
+            me(),
+            [
+                (me(), FootprintRead::Bytes(16384)),
+                (7, FootprintRead::Denied),
+                (me(), FootprintRead::Denied),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(tally.found, vec![(me(), 16384)]);
+        assert_eq!(tally.denied, vec![7]);
+        assert_eq!(tally.others_read, 0);
+    }
+
+    #[test]
+    fn tally_reads_is_none_when_nothing_was_read_nothing_denied_and_a_read_failed() {
+        let failed = || (me(), FootprintRead::Failed);
+        // Only failures, the caller's own included, say nothing.
+        let only_failed = tally_reads(
+            me(),
+            [
+                failed(),
+                (7, FootprintRead::Failed),
+                (8, FootprintRead::Gone),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(only_failed, None);
+        // The caller's own failure counts, and so do failures beside a read
+        // of the caller alone: that is the empty list again.
+        let own_failed = tally_reads(me(), [failed(), (8, FootprintRead::Gone)].into_iter());
+        assert_eq!(own_failed, None);
+        let own_read = tally_reads(
+            me(),
+            [(me(), FootprintRead::Bytes(5)), (7, FootprintRead::Failed)].into_iter(),
+        );
+        assert_eq!(own_read, None);
+        // One refusal, or one other read, among the failures is an answer.
+        let with_denied = tally_reads(me(), [failed(), (7, FootprintRead::Denied)].into_iter());
+        assert_eq!(with_denied.map(|tally| tally.denied), Some(vec![7]));
+        let with_read = tally_reads(me(), [failed(), (7, FootprintRead::Bytes(0))].into_iter());
+        assert_eq!(with_read.map(|tally| tally.others_read), Some(1));
+    }
+
+    #[test]
+    fn tally_reads_is_none_when_the_index_is_unavailable() {
+        let tally = tally_reads(
+            me(),
+            [
+                (1, FootprintRead::Bytes(5)),
+                (2, FootprintRead::Unavailable),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(tally, None);
+    }
+
+    #[test]
+    fn name_after_pidpath_uses_comm_only_when_eperm() {
+        // Literals, so a wrong `kinfo::EPERM` fails here. A path answers
+        // first; `ESRCH` and any other `errno` give no name.
+        // BORROW: `to_owned` builds the `String` from a literal.
+        let comm = || Some("p_comm".to_owned());
+        assert_eq!(name_after_pidpath(Err(1), comm), comm());
+        assert_eq!(
+            // BORROW: `to_owned` builds the `String`s from literals.
+            name_after_pidpath(Ok("Safari".to_owned()), comm),
+            Some("Safari".to_owned())
+        );
+        assert_eq!(name_after_pidpath(Err(3), comm), None);
+        assert_eq!(name_after_pidpath(Err(0), comm), None);
+    }
+
+    #[test]
+    fn comm_to_name_cuts_at_nul_and_rejects_what_is_not_a_name() {
+        // BORROW: `to_owned` builds the expected `String` from a literal.
+        assert_eq!(comm_to_name(b"abc\0def"), Some("abc".to_owned()));
+        // A full 16-byte name comes back whole.
+        assert_eq!(
+            comm_to_name(b"abcdefghijklmnop"),
+            // BORROW: `to_owned` builds the expected `String` from a literal.
+            Some("abcdefghijklmnop".to_owned())
+        );
+        assert_eq!(comm_to_name(b""), None);
+        assert_eq!(comm_to_name(&[0_u8; 17]), None);
+        assert_eq!(comm_to_name(b"ab\xffcd"), None);
+    }
+
+    #[test]
+    fn comm_to_name_keeps_the_valid_prefix_of_a_cut_char() {
+        // Each character is 3 bytes; the kernel's 16-byte cut falls inside
+        // the sixth.
+        // BORROW: `as_bytes` views the literal's bytes in place.
+        let full = "日本語プロセス名テスト".as_bytes();
+        assert_eq!(
+            comm_to_name(full.get(..16).unwrap()),
+            // BORROW: `to_owned` builds the expected `String` from a literal.
+            Some("日本語プロ".to_owned())
+        );
+        // A lead byte with nothing after it is a cut only at 16 bytes; a
+        // continuation byte after `ab` is invalid.
+        assert_eq!(comm_to_name(b"ab\xe3"), None);
+        assert_eq!(comm_to_name(b"ab\x80"), None);
+    }
+
+    #[test]
+    fn libproc_outcome_only_eperm_is_refused() {
+        // Literals, so a wrong `kinfo::EPERM` fails here.
+        assert_eq!(libproc_outcome(0, Some(1), vec![]), LibprocPids::Refused);
+        // `ESRCH`, `ENOMEM`, `EINVAL`, none: a failure, never a sandbox.
+        for errno in [Some(3), Some(12), Some(22), Some(0), None] {
+            assert_eq!(
+                libproc_outcome(0, errno, vec![]),
+                LibprocPids::Failed,
+                "errno {errno:?}"
+            );
+        }
+        // `errno` counts only when the call failed.
+        assert_eq!(
+            libproc_outcome(4, Some(1), vec![7]),
+            LibprocPids::Pids(vec![7])
+        );
+    }
+
+    #[test]
+    fn libproc_outcome_an_empty_list_is_failed() {
+        assert_eq!(libproc_outcome(8, None, vec![]), LibprocPids::Failed);
+    }
+
+    #[test]
+    fn kern_proc_pid_comm_returns_this_process_name() {
+        assert_is_my_comm(&kern_proc_pid_comm(me()).unwrap());
+    }
+
+    #[test]
+    fn kern_proc_pid_comm_is_none_for_a_dead_pid() {
+        assert_eq!(kern_proc_pid_comm(2_147_483_647), None);
+    }
+
+    #[test]
+    fn trust_kinfo_listing_keeps_records_only_when_self_is_one_648_byte_record() {
+        let listing = || {
+            Some(vec![KinfoRecord {
+                pid: 5,
+                comm: b"abc".to_vec(),
+            }])
+        };
+        // Positive control: the caller's own lookup is one record.
+        assert_eq!(
+            trust_kinfo_listing(listing(), || PidLookup::Record),
+            listing()
+        );
+        // A kernel with a larger record answers `ENOMEM` to `KERN_PROC_PID`.
+        assert_eq!(
+            trust_kinfo_listing(listing(), || {
+                classify_kern_proc_pid(-1, 12, &[0_u8; 648], 0, me())
+            }),
+            None
+        );
+        // No listing, or an empty one, is not trusted either.
+        assert_eq!(trust_kinfo_listing(None, || PidLookup::Record), None);
+        assert_eq!(
+            trust_kinfo_listing(Some(Vec::new()), || PidLookup::Record),
+            None
+        );
+    }
+
+    #[test]
+    fn list_kern_proc_all_holds_this_process() {
+        let listing = list_kern_proc_all();
+        if listing.is_none() && last_errno() == Some(kinfo::EPERM) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "metal tests: kern.proc.all refused (EPERM), skipping"
+            );
+            return;
+        }
+        let records = listing.unwrap_or_default();
+        let mine = records.iter().find(|record| record.pid == me());
+        assert!(
+            mine.is_some(),
+            "{} records, none for this process",
+            records.len()
+        );
+        assert_is_my_comm(&mine.map(|record| record.comm.clone()).unwrap_or_default());
     }
 }

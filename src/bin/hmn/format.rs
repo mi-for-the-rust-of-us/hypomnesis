@@ -8,6 +8,8 @@
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
+use hypomnesis::HypomnesisError;
+
 /// Binary byte-size ladder, shared by [`bytes_to_mib`], [`format_vram`],
 /// [`format_vram_precise`], and `parse_size_bytes`'s unit table — one
 /// definition of `KiB`/`MiB`/`GiB` instead of several independently
@@ -164,8 +166,9 @@ pub const REMEDY_OUTSIDE_SANDBOX: bool = cfg!(target_os = "macos");
 /// exhaustively by [`remedy_text`], the sole place that interprets it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemedyPurpose {
-    /// The names of protected rows, on `hmn ps`'s summary line
-    /// (`for names`).
+    /// The names of protected rows and of the processes the caller was
+    /// refused, on `hmn ps`'s summary line, the denial line and
+    /// `hmn watch`'s denied-PID notice (`for names`).
     Names,
     /// An unresolved PID whose memory grew, in `hmn watch`'s growth hint
     /// (`to identify`).
@@ -189,6 +192,33 @@ pub fn remedy_text(outside_sandbox: bool, purpose: RemedyPurpose) -> String {
     };
     // BORROW: explicit to_owned — the caller owns the remedy text.
     text.to_owned()
+}
+
+/// `text`, then ` — ` and the remedy for [`RemedyPurpose::Names`]: the one
+/// join every line that ends in a remedy goes through, so the separator,
+/// the purpose and the order are spelled once.
+#[must_use]
+pub fn with_remedy(text: &str, outside_sandbox: bool) -> String {
+    format!(
+        "{text} — {}",
+        remedy_text(outside_sandbox, RemedyPurpose::Names)
+    )
+}
+
+/// The text `hmn ps` and `hmn watch` print for a failed device query: the
+/// error's `Display`, with ` — ` and [`remedy_text`] for
+/// [`RemedyPurpose::Names`] appended when the error is
+/// [`HypomnesisError::ProcessListDenied`], the one failure a sandbox
+/// causes and the user can remedy. Every other error is its `Display`.
+/// One function, so the skip line, the `--device` line and the attach
+/// error of `hmn watch` cannot word the denial differently.
+#[must_use]
+pub fn failure_detail(e: &HypomnesisError, outside_sandbox: bool) -> String {
+    if matches!(e, HypomnesisError::ProcessListDenied { .. }) {
+        with_remedy(&e.to_string(), outside_sandbox)
+    } else {
+        e.to_string()
+    }
 }
 
 /// Compute the width of a table column as `max(header.len(),
@@ -706,6 +736,31 @@ mod tests {
         assert_eq!(
             remedy_text(true, RemedyPurpose::Names),
             "re-run outside the sandbox"
+        );
+    }
+
+    // --- failure_detail ---
+
+    #[test]
+    fn failure_detail_appends_the_remedy_to_a_denial_only() {
+        assert_eq!(
+            failure_detail(&HypomnesisError::ProcessListDenied { denied: 908 }, true),
+            "process list unreadable (908 refused, none other than the caller's could be read) \
+             — re-run outside the sandbox"
+        );
+        assert_eq!(
+            failure_detail(
+                &HypomnesisError::DeviceIndexOutOfRange { index: 3, count: 1 },
+                true
+            ),
+            "device index 3 out of range (have 1 devices)"
+        );
+        // The error a macos-latest VM gives: no remedy either.
+        let no_source = failure_detail(&HypomnesisError::NoGpuSource, true);
+        assert!(
+            no_source.starts_with("no GPU measurement source available")
+                && !no_source.contains("re-run"),
+            "{no_source}"
         );
     }
 

@@ -12,7 +12,8 @@
 /// `HypomnesisError`'s `Display` impl is the **default English one-liner** —
 /// suitable for logs, library-tier error reporting, and `?`-propagation where
 /// the consumer is content with the default rendering. Structured fields
-/// ([`Self::DeviceIndexOutOfRange`]'s `index` / `count`, the inner `String` of
+/// ([`Self::DeviceIndexOutOfRange`]'s `index` / `count`,
+/// [`Self::ProcessListDenied`]'s `denied`, the inner `String` of
 /// [`Self::Nvml`] / [`Self::Dxgi`] / [`Self::Pdh`] / [`Self::NvidiaSmi`]) are
 /// the **canonical source** for any consumer that wants to:
 ///
@@ -75,7 +76,12 @@ pub enum HypomnesisError {
     /// Returned when `NVML`, `DXGI`, `PDH`, and `nvidia-smi` all failed
     /// (or were disabled by feature flags) for a single query. On macOS,
     /// `Metal` replaces `DXGI` and `PDH`, and the message names `Metal`,
-    /// `NVML`, and `nvidia-smi`.
+    /// `NVML`, and `nvidia-smi`. On macOS, [`crate::gpu_processes`] and
+    /// [`crate::gpu_process_listing`] also return it when the caller's
+    /// sandbox refuses `proc_listpids` and no `sysctl` listing can stand in,
+    /// for example when `KERN_PROC_ALL` is refused, or is allowed while
+    /// `KERN_PROC_PID`, which vouches for its record size, is refused; the
+    /// sandbox is then the cause, though the message names the backends.
     #[cfg_attr(
         target_os = "macos",
         error(
@@ -89,6 +95,24 @@ pub enum HypomnesisError {
         )
     )]
     NoGpuSource,
+
+    /// The processes were enumerated but none other than the caller's
+    /// could be read, so the list says nothing about the machine.
+    ///
+    /// Returned on macOS, by [`crate::gpu_process_listing`] and
+    /// [`crate::gpu_processes`], when at least one process was refused and
+    /// no process other than the caller's could be read: the caller's
+    /// sandbox refuses the ledger read of every other process, and under a
+    /// profile that refuses it for every process, the caller's own too.
+    /// `denied` is the number of processes refused, the caller excluded,
+    /// saturating at `u32::MAX`.
+    #[error(
+        "process list unreadable ({denied} refused, none other than the caller's could be read)"
+    )]
+    ProcessListDenied {
+        /// How many processes' GPU memory the caller was refused.
+        denied: u32,
+    },
 
     /// Generic I/O error.
     ///
@@ -124,6 +148,15 @@ mod tests {
         assert_eq!(
             text,
             "no GPU measurement source available (Metal, NVML, and nvidia-smi all failed or are disabled)"
+        );
+    }
+
+    #[test]
+    fn process_list_denied_display_states_the_count_and_no_remedy() {
+        let text = HypomnesisError::ProcessListDenied { denied: 908 }.to_string();
+        assert_eq!(
+            text,
+            "process list unreadable (908 refused, none other than the caller's could be read)"
         );
     }
 }

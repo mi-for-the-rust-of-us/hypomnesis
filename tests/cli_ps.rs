@@ -44,26 +44,46 @@ fn ps_device_out_of_range_exits_2_with_the_reason() {
     );
 }
 
-/// Whether `stderr` holds a skipped-device line: `hmn ps` without
-/// `--device` names each device whose query failed, ending ` (skipped)`.
-fn skipped_device_line(stderr: &str) -> bool {
-    stderr
-        .lines()
-        .any(|l| l.starts_with("hmn: ps failed to query device ") && l.ends_with(" (skipped)"))
+/// Whether `stderr` holds a skipped-device line that carries `text`: `hmn ps`
+/// without `--device` names each device whose query failed, ending
+/// ` (skipped)`.
+fn skipped_device_line(stderr: &str, text: &str) -> bool {
+    stderr.lines().any(|l| {
+        l.starts_with("hmn: ps failed to query device ")
+            && l.ends_with(" (skipped)")
+            && l.contains(text)
+    })
 }
+
+/// The start of `HypomnesisError::ProcessListDenied`'s `Display`, and so of
+/// the detail a denied device's skip line carries.
+const DENIAL_TEXT: &str = "process list unreadable (";
+
+/// The start of `HypomnesisError::NoGpuSource`'s `Display`, the same on
+/// every platform before its list of backends.
+const NO_GPU_SOURCE_TEXT: &str = "no GPU measurement source available";
+
+/// The remedy a denied device's line ends with, apart from ` (skipped)`.
+#[cfg(target_os = "macos")]
+const REMEDY_TEXT: &str = "re-run outside the sandbox";
 
 /// Judge an exit code that should be `expected` on a host where every
 /// device answers (or none is there to try), and may instead be `2` where
 /// a tried device failed, but only together with its skip line: a bare
-/// exit `2` never passes. Writes `cli_ps: <label> branch=<branch>` straight
-/// to stderr, so the branch taken is in CI's log even for a passing test
-/// (`eprintln!` is captured by `libtest` and hidden), and asserts the branch
-/// is not `rejected`.
+/// exit `2` never passes. The skip line must say why: the process list was
+/// unreadable (a sandbox that denies `process-info*`), or no GPU source
+/// is available (a host whose source fails for another reason, such as a
+/// macOS VM) under its own label. Writes `cli_ps: <label> branch=<branch>`
+/// straight to stderr, so the branch taken is in CI's log even for a passing
+/// test (`eprintln!` is captured by `libtest` and hidden), and asserts the
+/// branch is not `rejected`.
 fn accept(label: &str, code: Option<i32>, stderr: &str, expected: i32) {
     let branch = if code == Some(expected) {
         "expected"
-    } else if code == Some(2) && skipped_device_line(stderr) {
+    } else if code == Some(2) && skipped_device_line(stderr, DENIAL_TEXT) {
         "skipped-device"
+    } else if code == Some(2) && skipped_device_line(stderr, NO_GPU_SOURCE_TEXT) {
+        "skipped-device-nogpu"
     } else {
         "rejected"
     };
@@ -77,8 +97,7 @@ fn accept(label: &str, code: Option<i32>, stderr: &str, expected: i32) {
 /// `--exit-status` makes "nothing listed" exit `1`, as `pgrep` does;
 /// without it the same listing exits `0`. No process has PID `u32::MAX`.
 /// On a host with no device to try (`device_count()` fails: the ubuntu and
-/// windows runners) that still holds. On a host whose GPU source fails (a
-/// sandbox that refuses `proc_listpids`, possibly a macos-latest VM) both
+/// windows runners) that still holds. On a host whose GPU source fails both
 /// listings exit `2` with a skipped-device line instead, since nothing
 /// could be listed; `accept` takes that branch only with the line.
 #[test]
@@ -118,18 +137,26 @@ fn hmn_under_denied_process_info(args: &[&str]) -> (Option<i32>, String, String)
 }
 
 /// Inside a sandbox that denies `process-info*`, `hmn ps` cannot list its
-/// one device: it names the device with a skip line, prints nothing on
-/// stdout, closes with the all-failed line and exits `2`, where it printed
-/// an empty table, `0 GPU processes found.` and exit `0`. With
-/// `--exit-status`, the empty listing exits `2` (can't tell), not `1`
-/// (nothing matched).
+/// one device: it names the device with a skip line that says the process
+/// list was unreadable and what to do about it, prints nothing on stdout,
+/// closes with the all-failed line and exits `2`, never an empty table and
+/// exit `0`. With `--exit-status`, the empty listing exits `2` (can't tell),
+/// not `1` (nothing matched). With `--device` the line is the same without
+/// its ` (skipped)`.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires a usable Metal device and an unsandboxed parent (it applies a Seatbelt profile with /usr/bin/sandbox-exec)"]
 fn ps_exits_2_with_the_skip_line_when_process_info_is_denied() {
     let (code, stdout, stderr) = hmn_under_denied_process_info(&["ps"]);
     assert_eq!(code, Some(2), "stderr: {stderr}");
-    assert!(skipped_device_line(&stderr), "stderr: {stderr}");
+    assert!(
+        skipped_device_line(&stderr, DENIAL_TEXT),
+        "stderr: {stderr}"
+    );
+    assert!(
+        skipped_device_line(&stderr, REMEDY_TEXT),
+        "stderr: {stderr}"
+    );
     assert!(
         stderr
             .lines()
@@ -145,4 +172,21 @@ fn ps_exits_2_with_the_skip_line_when_process_info_is_denied() {
     let (code, _stdout, stderr) =
         hmn_under_denied_process_info(&["ps", "--pid", "4294967295", "--exit-status"]);
     assert_eq!(code, Some(2), "stderr: {stderr}");
+
+    // `--device` names the same denial, with the same remedy, and no
+    // ` (skipped)`: the device was asked for, not skipped.
+    let (code, _stdout, stderr) = hmn_under_denied_process_info(&["ps", "--device", "0"]);
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.lines().any(|l| {
+            l.starts_with("hmn: ps failed to query device 0: ")
+                && l.contains(DENIAL_TEXT)
+                && l.ends_with(REMEDY_TEXT)
+        }),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !skipped_device_line(&stderr, DENIAL_TEXT),
+        "stderr: {stderr}"
+    );
 }

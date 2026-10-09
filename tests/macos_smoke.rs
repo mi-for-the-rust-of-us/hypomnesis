@@ -2,8 +2,8 @@
 
 //! macOS smoke test: exercises the Metal-backed surfaces of the public
 //! API (`process_rss`, `device_count`, `device_info`, `process_gpu_info`,
-//! `gpu_processes`, `Snapshot::now`) and asserts the contract values are
-//! sane on an Apple Silicon host.
+//! `gpu_processes`, `gpu_process_listing`, `Snapshot::now`) and asserts the
+//! contract values are sane on an Apple Silicon host.
 //!
 //! The whole file is gated on `target_os = "macos"`; on Windows and
 //! Linux the file compiles to zero tests. The module-level `//!` doc
@@ -17,10 +17,10 @@
 //! are `#[ignore]`-gated because they require Apple Silicon hardware
 //! with a real Metal device — they would fail on Intel Macs (where the
 //! Metal backend returns `None` and the dispatcher falls through to
-//! `NoGpuSource`) or on hosted runners without a usable GPU. Test 8 is
-//! `#[ignore]`d too: it applies Seatbelt profiles with
-//! `/usr/bin/sandbox-exec`, which needs an unsandboxed parent, and fails
-//! rather than skips where it cannot. Run them locally on Apple Silicon
+//! `NoGpuSource`) or on hosted runners without a usable GPU. Tests 8 and 9
+//! are `#[ignore]`d too: they apply Seatbelt profiles with
+//! `/usr/bin/sandbox-exec`, which needs an unsandboxed parent, and fail
+//! rather than skip where they cannot. Run them locally on Apple Silicon
 //! with `cargo test -- --ignored`.
 
 #![cfg(target_os = "macos")]
@@ -122,10 +122,11 @@ fn gpu_processes_returns_metal_rows_for_self() {
     // no Metal device context and so produces no `graphics_footprint` entry
     // in the kernel ledger — `gpu_processes(0)` returns plenty of other
     // PIDs (WindowServer, Safari, etc.) but never ours. We therefore
-    // accept three outcomes: (a) self is present (binary with Metal
+    // accept these outcomes: (a) self is present (binary with Metal
     // residency), (b) Ok with self absent but every row uses the Metal
     // source (parity with `tests/smoke.rs::gpu_processes_returns_result_or_no_gpu_source`),
-    // (c) Err(NoGpuSource) on a non-GPU host.
+    // (c) Err(NoGpuSource) on a non-GPU host, (d) Err(ProcessListDenied)
+    // where a sandbox refuses every process but the caller's.
     match hypomnesis::gpu_processes(0) {
         Ok(rows) => {
             let self_pid = std::process::id();
@@ -149,7 +150,10 @@ fn gpu_processes_returns_metal_rows_for_self() {
         }
         Err(e) => {
             assert!(
-                matches!(e, HypomnesisError::NoGpuSource),
+                matches!(
+                    e,
+                    HypomnesisError::NoGpuSource | HypomnesisError::ProcessListDenied { .. }
+                ),
                 "unexpected error from gpu_processes(0): {e:?}"
             );
         }
@@ -304,6 +308,85 @@ fn process_exists_under_sandbox_profiles() {
         assert_eq!(
             got,
             process_exists_lines(&expected),
+            "profile {name}: child stdout {stdout:?}, stderr {stderr:?}"
+        );
+    }
+}
+
+/// How `gpu_process_listing(0)` answers this process, as the one label the
+/// child of `gpu_process_listing_under_sandbox_profiles` prints.
+fn listing_label() -> String {
+    match hypomnesis::gpu_process_listing(0) {
+        Ok(listing) if listing.denied_pids.contains(&std::process::id()) => {
+            // BORROW: `to_owned` builds the label's `String` from a literal.
+            "caller_denied".to_owned()
+        }
+        // BORROW: `to_owned` builds the label's `String` from a literal.
+        Ok(listing) if listing.denied_pids.is_empty() => "open".to_owned(),
+        Ok(_) => "partial".to_owned(),
+        // BORROW: `to_owned` builds the label's `String` from a literal.
+        Err(HypomnesisError::ProcessListDenied { .. }) => "denied".to_owned(),
+        Err(other) => format!("{other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "requires an unsandboxed parent and /usr/bin/sandbox-exec (applies Seatbelt profiles S, S0 and L)"]
+#[allow(clippy::expect_used)] // test-only
+fn gpu_process_listing_under_sandbox_profiles() {
+    // No skip in either role, as in `process_exists_under_sandbox_profiles`.
+    // Child role: prove it runs inside a sandbox, then print the label.
+    if std::env::var_os("HMN_GPL_CHILD").is_some() {
+        assert!(
+            !sandbox_can_apply_a_profile(),
+            "HMN_GPL_CHILD set outside a sandbox"
+        );
+        println!("LISTING {}", listing_label());
+        return;
+    }
+    assert!(
+        sandbox_can_apply_a_profile(),
+        "sandbox-exec cannot apply a profile here (already inside a sandbox?), \
+         so profiles S, S0 and L cannot be exercised"
+    );
+    assert_eq!(listing_label(), "open", "unsandboxed");
+
+    // S0 denies `process-info*` except for the caller and its sandbox; S is
+    // S0 with a resident `bash`, a sibling the caller can read, so the list
+    // is partial. L denies the ledger read of every process, the caller's too.
+    let s0 = "(version 1)(allow default)(deny process-info*)(allow process-info* (target self))(allow process-info* (target same-sandbox))";
+    let l = "(version 1)(allow default)(deny process-info-ledger)";
+    let exe = std::env::current_exe().expect("current_exe of the test binary");
+    for (name, profile, under_bash, label) in [
+        ("S", s0, true, "partial"),
+        ("S0", s0, false, "denied"),
+        ("L", l, false, "denied"),
+    ] {
+        let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+        command.args(["-p", profile]);
+        if under_bash {
+            command.args(["/bin/bash", "-c", "\"$@\"; rc=$?; exit $rc", "_"]);
+        }
+        let out = command
+            .arg(&exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "gpu_process_listing_under_sandbox_profiles",
+                "--nocapture",
+            ])
+            .env("HMN_GPL_CHILD", "1")
+            .output()
+            .expect("spawn /usr/bin/sandbox-exec");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let got: Vec<&str> = stdout
+            .lines()
+            .filter(|l| l.starts_with("LISTING "))
+            .collect();
+        assert_eq!(
+            got,
+            [format!("LISTING {label}")],
             "profile {name}: child stdout {stdout:?}, stderr {stderr:?}"
         );
     }

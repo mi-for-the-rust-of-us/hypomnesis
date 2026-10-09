@@ -10,11 +10,13 @@ use std::process::ExitCode;
 
 use clap::ValueEnum;
 use hypomnesis::spill::DEFAULT_SHARED_GROWTH_BYTES;
-use hypomnesis::{GpuProcessEntry, device_count, device_info, gpu_processes, snapshot_is_spilling};
+use hypomnesis::{
+    GpuProcessEntry, device_count, device_info, gpu_process_listing, snapshot_is_spilling,
+};
 
 use crate::format::{
-    REMEDY_OUTSIDE_SANDBOX, RemedyPurpose, Table, format_vram, format_vram_precise,
-    json_string_or_null, json_value_or_null, remedy_text, spill_cell,
+    REMEDY_OUTSIDE_SANDBOX, Table, failure_detail, format_vram, format_vram_precise,
+    json_string_or_null, json_value_or_null, spill_cell, with_remedy,
 };
 
 /// One row of `hmn ps` output (binary-internal — not part of the
@@ -176,6 +178,10 @@ pub struct SummaryNotes {
     /// One entry per device whose verdict is `Some(true)`, in device
     /// order. Empty when no device is spilling or spill is not measurable.
     pub spilling: Vec<DeviceSpill>,
+    /// The processes the caller was refused ([`hypomnesis::GpuProcessListing::denied_pids`])
+    /// that `--pid` leaves relevant ([`PsFilters::relevant_denied`]), summed
+    /// over the devices listed. Always `0` off macOS.
+    pub unreadable: usize,
 }
 
 /// Build the row comparator for a given [`SortKey`], shared by `hmn ps`
@@ -256,11 +262,19 @@ impl PsFilters {
         }
     }
 
+    /// Whether `--pid` admits `pid`: every PID when none was given, else
+    /// the ones named. The one `--pid` test, shared by [`Self::judge`] and
+    /// [`Self::relevant_denied`].
+    #[must_use]
+    fn pid_selected(&self, pid: u32) -> bool {
+        self.pids.is_empty() || self.pids.contains(&pid)
+    }
+
     /// Judge a process on an already-selected device against the
     /// row-level filters (`--pid`, `--min`, then `--filter`).
     #[must_use]
     pub fn judge(&self, entry: &GpuProcessEntry) -> PsJudgement {
-        let size_and_pid = (self.pids.is_empty() || self.pids.contains(&entry.pid))
+        let size_and_pid = self.pid_selected(entry.pid)
             && self.min_bytes.is_none_or(|min| {
                 footprint_bytes(entry.used_bytes, entry.shared_used_bytes) >= min
             });
@@ -275,6 +289,15 @@ impl PsFilters {
             Some(_) => PsJudgement::Filtered,
             None => PsJudgement::Unnamed,
         }
+    }
+
+    /// How many of the `denied` PIDs a listing with these filters could
+    /// have held: every one without `--pid`, else the ones `--pid` names.
+    /// A denied process's size and name are unknown, so `--min` and
+    /// `--filter` cannot exclude it.
+    #[must_use]
+    pub fn relevant_denied(&self, denied: &[u32]) -> usize {
+        denied.iter().filter(|&&pid| self.pid_selected(pid)).count()
     }
 
     /// The summary line's filter clauses (`pid=N[,N…]`, `device=M`,
@@ -372,13 +395,20 @@ const ALL_DEVICES_FAILED_LINE: &str =
 
 /// The exit code of a listing that reached the end of `run_ps`: `0`
 /// without `exit_status` or when rows are listed; with it and nothing
-/// listed, `1` when every tried device answered, `2` when one of them
-/// (`failed > 0`) did not — the process may sit on the skipped device.
+/// listed, `2` when a process the filters could match was unreadable
+/// (`relevant_denied > 0`) or a tried device failed (`failed > 0`) — the
+/// process may be the one that was refused, or sit on the skipped device —
+/// and `1` otherwise: every device answered and nothing matched.
 #[must_use]
-const fn ps_exit_code(exit_status: bool, rows_empty: bool, failed: usize) -> u8 {
+const fn ps_exit_code(
+    exit_status: bool,
+    rows_empty: bool,
+    failed: usize,
+    relevant_denied: usize,
+) -> u8 {
     if !exit_status || !rows_empty {
         0
-    } else if failed > 0 {
+    } else if relevant_denied > 0 || failed > 0 {
         2
     } else {
         1
@@ -402,15 +432,22 @@ const fn ps_exit_code(exit_status: bool, rows_empty: bool, failed: usize) -> u8 
 ///
 /// Without `--device`, a device that fails is skipped with a stderr line
 /// ending ` (skipped)` (`device_query_failure_line`), so one broken
-/// device does not kill the whole listing.
+/// device does not kill the whole listing. A device whose process list
+/// was unreadable (`HypomnesisError::ProcessListDenied`) is such a
+/// failure, and its line ends with the remedy ([`failure_detail`]).
+/// When a device lists with some processes refused, the rows are
+/// printed and the summary counts the refused ones that `--pid` leaves
+/// relevant ([`PsFilters::relevant_denied`]).
 /// When every device failed (at least one tried, none answering), `run_ps`
 /// prints `ALL_DEVICES_FAILED_LINE` and exits `2` with nothing on
 /// stdout: `--json` prints nothing on that exit, not `[]`, since a table
 /// or `[]` would read as "idle". Under `exit_status`, an empty listing
-/// that skipped a failed device exits `2`, not `1` (`ps_exit_code`):
-/// `1` means "queried, nothing matched", and the job may sit on the
-/// skipped device. With no device to try at all (`device_count()`
-/// failed), nothing was skipped, and the listing exits as before.
+/// that skipped a failed device or left a process the filters could match
+/// unreadable exits `2`, not `1` (`ps_exit_code`): `1` means "queried,
+/// nothing matched", and the job may sit on the skipped device or be the
+/// process that was refused. With no device to try at all
+/// (`device_count()` failed), nothing was skipped, and the listing exits
+/// as before.
 pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool) -> ExitCode {
     // device_count returning Err here means no enumeration backend is
     // enabled / every backend failed; treat as zero NVIDIA devices and
@@ -444,10 +481,10 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
         // where spill cannot exist (the cell reads n/a), and on Windows
         // pre-WDDM-2.0, a non-NVIDIA adapter, or a PDH hiccup (it reads ?).
         //
-        // Sampled *before* gpu_processes(idx), not after: the SHARED
+        // Sampled *before* gpu_process_listing(idx), not after: the SHARED
         // column on each row and the SPILL verdict broadcast onto it
         // should describe the same instant. Sampling after would let a
-        // process's per-process PDH enumeration (which gpu_processes
+        // process's per-process PDH enumeration (which gpu_process_listing
         // performs) and the Toolhelp32Snapshot name-resolution walk
         // elapse in between — real time under load — so a job that
         // starts or stops spilling in that gap would show a SHARED
@@ -456,22 +493,26 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
         // device every row of which the --pid/--min/--filter filters end up
         // dropping; that's the accepted trade (measured negligible on
         // the reference machine — see CHANGELOG) for not straddling
-        // gpu_processes()'s own call duration, the same call-ordering
+        // gpu_process_listing()'s own call duration, the same call-ordering
         // discipline `hmn watch`'s wall_clock/t_ms pairing uses.
         let spilling = snapshot_is_spilling(idx);
         tried += 1;
-        let entries = match gpu_processes(idx) {
-            Ok(entries) => entries,
+        let listing = match gpu_process_listing(idx) {
+            Ok(listing) => listing,
             Err(e) if filters.device.is_some() => {
-                eprintln!("{}", device_query_failure_line(idx, &e, false));
+                let detail = failure_detail(&e, REMEDY_OUTSIDE_SANDBOX);
+                eprintln!("{}", device_query_failure_line(idx, &detail, false));
                 return ExitCode::from(2);
             }
             Err(e) => {
-                eprintln!("{}", device_query_failure_line(idx, &e, true));
+                let detail = failure_detail(&e, REMEDY_OUTSIDE_SANDBOX);
+                eprintln!("{}", device_query_failure_line(idx, &detail, true));
                 failed += 1;
                 continue;
             }
         };
+        notes.unreadable += filters.relevant_denied(&listing.denied_pids);
+        let entries = listing.entries;
         // Over every process on the device, before any filter: a row's
         // share of the device's shared bytes, and the device's summary
         // clause, must not depend on which rows are displayed.
@@ -530,7 +571,7 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
     // (name ascending for grouping duplicate-name processes like
     // `msedgewebview2.exe`, then PID ascending for stable order across
     // runs) are identical regardless of key — see `ps_row_comparator`.
-    // The library's `gpu_processes()` returns rows PID-sorted; this
+    // The library's `gpu_process_listing()` returns rows PID-sorted; this
     // overrides that for display only.
     rows.sort_by(ps_row_comparator(sort));
 
@@ -546,16 +587,40 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
     // non-empty, so the message is a consistent confirmation rather than
     // an error indicator. Redirect 2>/dev/null to suppress.
     eprintln!("hmn: {}", format_ps_summary(&rows, filters, &notes));
-    ExitCode::from(ps_exit_code(exit_status, rows.is_empty(), failed))
+    let code = ps_exit_code(exit_status, rows.is_empty(), failed, notes.unreadable);
+    ExitCode::from(code)
+}
+
+/// The parenthetical's remedy clause, or `None` when nothing is counted:
+/// `N unreadable` (processes the caller was refused) and `M protected`
+/// (rows whose name could not be resolved), each present only when
+/// non-zero, joined by `, `, then ` — ` and the one remedy
+/// ([`with_remedy`]). On Windows and Linux only `M protected —
+/// re-run elevated for names` can occur; on macOS the one remedy,
+/// `re-run outside the sandbox`, covers both counts.
+#[must_use]
+pub fn remedy_clause(protected: usize, unreadable: usize, outside_sandbox: bool) -> Option<String> {
+    let mut counts: Vec<String> = Vec::new();
+    if unreadable > 0 {
+        counts.push(format!("{unreadable} unreadable"));
+    }
+    if protected > 0 {
+        counts.push(format!("{protected} protected"));
+    }
+    if counts.is_empty() {
+        return None;
+    }
+    Some(with_remedy(&counts.join(", "), outside_sandbox))
 }
 
 /// Build the stderr summary string for `hmn ps`. Format:
 /// `<N> GPU process[es] found[ matching <filters>][ (<parts>)][; device <D> spilling: [<F> free, ]<S> shared, <P> process[es] paged]….`,
 /// where `<parts>` joins, with `; `, whichever of `<X.Y> <unit> committed
-/// total`, `<M> protected — <remedy>` and `<K> unnamed not matched` apply,
-/// where `<remedy>` is `re-run elevated for names` (Windows, Linux) or
-/// `re-run outside the sandbox` (macOS, `outside_sandbox == true`), as
-/// [`remedy_text`] words it for [`RemedyPurpose::Names`].
+/// total`, the remedy clause (`<U> unreadable` and `<M> protected`, joined
+/// by `, `, then ` — <remedy>`; see [`remedy_clause`]) and `<K> unnamed not
+/// matched` apply, where `<remedy>` is `re-run elevated for names`
+/// (Windows, Linux) or `re-run outside the sandbox` (macOS,
+/// `outside_sandbox == true`), as [`with_remedy`] words it.
 ///
 /// Three appendices after the noun, each elided when not applicable:
 ///
@@ -577,14 +642,26 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
 ///   committed on a 16 `GiB` card. Elided entirely when `count == 0`
 ///   because a zero-bytes total carries no information.
 ///
+///   The parenthetical carries an **unreadable count**
+///   (`; U unreadable — re-run outside the sandbox`) when `notes.unreadable`
+///   is non-zero: the processes the caller was refused
+///   ([`hypomnesis::GpuProcessListing::denied_pids`]) that `--pid` leaves
+///   relevant ([`PsFilters::relevant_denied`]). They are not listed, since
+///   neither their size nor their name is known, so the count says how much
+///   of the machine the listing does not cover. It is always `0` off macOS.
+///
 ///   When at least one row is genuinely unresolvable, the parenthetical
 ///   carries a **protected continuation**
 ///   (`; M protected — re-run elevated for names` on Windows and Linux,
 ///   `; M protected — re-run outside the sandbox` on macOS, where
-///   `outside_sandbox == true`) joined by `; `. A row
+///   `outside_sandbox == true`) joined by `; `. When both counts are
+///   non-zero they share one clause and say the remedy once
+///   (`U unreadable, M protected — re-run outside the sandbox`). A row
 ///   counts as protected when `name.is_none()` (`NVML`'s
-///   `/proc/<pid>/comm` unreadable on Linux; on macOS when the sandbox
-///   withheld `proc_pidpath` — see README Limitations, item 9);
+///   `/proc/<pid>/comm` unreadable on Linux; on macOS when no source gave a
+///   name, as when a sandbox refuses both `proc_pidpath` and
+///   `KERN_PROC_PID` — see [`hypomnesis::GpuProcessEntry::name`] and README
+///   Limitations, item 9);
 ///   when `name` is exactly `Some("[protected]")` (the
 ///   Windows-only bracket meaning the `Toolhelp32Snapshot` fallback could
 ///   not be taken at all — see `hypomnesis::gpu_processes`'s Windows
@@ -653,8 +730,9 @@ fn format_ps_summary_with(
         let _ = write!(out, " matching {}", clauses.join(" "));
     }
 
-    // The parenthetical: committed total, protected count, unnamed count,
-    // each present only when it says something, joined by "; ". The word
+    // The parenthetical: committed total, remedy clause (unreadable and
+    // protected counts, one remedy), unnamed count, each present only when
+    // it says something, joined by "; ". The word
     // "committed" hints at the WDDM commit-vs-resident distinction the
     // Windows backend exposes — summing `used_bytes` across processes can
     // exceed physical VRAM under WDDM (a real WDDM property, not a bug),
@@ -665,12 +743,7 @@ fn format_ps_summary_with(
     if count > 0 {
         parts.push(format!("{} committed total", format_vram(committed_total)));
     }
-    if protected > 0 {
-        parts.push(format!(
-            "{protected} protected — {}",
-            remedy_text(outside_sandbox, RemedyPurpose::Names)
-        ));
-    }
+    parts.extend(remedy_clause(protected, notes.unreadable, outside_sandbox));
     if notes.unnamed > 0 {
         parts.push(format!("{} unnamed not matched", notes.unnamed));
     }
@@ -935,22 +1008,56 @@ mod tests {
 
     #[test]
     fn ps_exit_code_table_pins_the_exit_status_rule() {
-        for ((exit_status, rows_empty, failed), want) in [
-            ((false, false, 0), 0),
-            ((false, true, 0), 0),
-            ((false, true, 1), 0),
-            ((true, false, 0), 0),
-            ((true, false, 1), 0),
-            ((true, true, 0), 1),
-            ((true, true, 1), 2),
-            ((true, true, 2), 2),
+        for ((exit_status, rows_empty, failed, relevant_denied), want) in [
+            ((false, false, 0, 0), 0),
+            ((false, true, 0, 0), 0),
+            ((false, true, 1, 0), 0),
+            ((true, false, 0, 0), 0),
+            ((true, false, 1, 0), 0),
+            ((true, true, 0, 0), 1),
+            ((true, true, 1, 0), 2),
+            ((true, true, 2, 0), 2),
+            // With the rows above, all 16 cells of the four inputs: a
+            // failed device with listed rows and no exit status, and every
+            // cell with a relevant denied PID.
+            ((false, false, 1, 0), 0),
+            ((false, false, 0, 1), 0),
+            ((false, false, 1, 1), 0),
+            ((false, true, 0, 1), 0),
+            ((false, true, 1, 1), 0),
+            ((true, false, 0, 1), 0),
+            ((true, false, 1, 1), 0),
+            ((true, true, 0, 1), 2),
+            ((true, true, 1, 1), 2),
         ] {
             assert_eq!(
-                ps_exit_code(exit_status, rows_empty, failed),
+                ps_exit_code(exit_status, rows_empty, failed, relevant_denied),
                 want,
-                "(exit_status, rows_empty, failed) = ({exit_status}, {rows_empty}, {failed})"
+                "(exit_status, rows_empty, failed, relevant_denied) = \
+                 ({exit_status}, {rows_empty}, {failed}, {relevant_denied})"
             );
         }
+    }
+
+    // --- relevant_denied ---
+
+    #[test]
+    fn relevant_denied_counts_every_denied_pid_or_only_the_pid_asked_for() {
+        assert_eq!(PsFilters::default().relevant_denied(&[1, 2, 3]), 3);
+        assert_eq!(filters(&[2, 3], None, None).relevant_denied(&[1, 2, 3]), 2);
+        assert_eq!(filters(&[9], None, None).relevant_denied(&[1, 2, 3]), 0);
+    }
+
+    #[test]
+    fn relevant_denied_ignores_min_and_filter() {
+        // A denied PID's size and name are unknown, so neither `--min` nor
+        // `--filter` can exclude it.
+        // BORROW: `to_owned` builds the filter's `String` from a literal.
+        let f = PsFilters::new(&[], None, Some(1 << 30), vec!["canvas".to_owned()]);
+        assert_eq!(f.relevant_denied(&[1, 2, 3]), 3);
+        // BORROW: `to_owned` builds the filter's `String` from a literal.
+        let f = PsFilters::new(&[2], None, Some(1 << 30), vec!["canvas".to_owned()]);
+        assert_eq!(f.relevant_denied(&[1, 2, 3]), 1);
     }
 
     // --- resolved_name (PID-reuse comparison filter) ---
@@ -1268,7 +1375,7 @@ mod tests {
     fn unnamed(n: usize) -> SummaryNotes {
         SummaryNotes {
             unnamed: n,
-            spilling: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1404,6 +1511,7 @@ mod tests {
         let notes = SummaryNotes {
             unnamed: 0,
             spilling: vec![askesis_spill()],
+            ..Default::default()
         };
         assert_eq!(
             format_ps_summary(&rows, &PsFilters::default(), &notes),
@@ -1428,6 +1536,7 @@ mod tests {
                     ..askesis_spill()
                 },
             ],
+            ..Default::default()
         };
         // The verdict holds even when a filter lists nothing.
         assert_eq!(
@@ -1716,6 +1825,61 @@ mod tests {
         assert_eq!(
             format_ps_summary(&rows, &filters(&[], None, None), &SummaryNotes::default()),
             "3 GPU processes found (0 MiB committed total)."
+        );
+    }
+
+    // -- unreadable-count clause --
+
+    /// Summary notes carrying only an unreadable count.
+    fn unreadable(n: usize) -> SummaryNotes {
+        SummaryNotes {
+            unreadable: n,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn format_ps_summary_unreadable_counts_with_the_macos_remedy() {
+        assert_eq!(
+            format_ps_summary_with(
+                &unprotected_rows(0),
+                &filters(&[], None, None),
+                &unreadable(907),
+                true
+            ),
+            "0 GPU processes found (907 unreadable — re-run outside the sandbox)."
+        );
+    }
+
+    #[test]
+    fn format_ps_summary_unreadable_and_protected_say_the_remedy_once() {
+        let mut rows = unprotected_rows(3);
+        rows.extend(protected_rows(1));
+        let s = format_ps_summary_with(&rows, &filters(&[], None, None), &unreadable(907), true);
+        assert_eq!(
+            s,
+            "4 GPU processes found (0 MiB committed total; 907 unreadable, 1 protected — re-run outside the sandbox)."
+        );
+        assert_eq!(s.matches("re-run").count(), 1, "{s}");
+    }
+
+    #[test]
+    fn format_ps_summary_unreadable_zero_changes_nothing() {
+        let mut rows = unprotected_rows(3);
+        rows.extend(protected_rows(1));
+        let f = filters(&[], None, None);
+        assert_eq!(
+            format_ps_summary_with(&rows, &f, &unreadable(0), true),
+            "4 GPU processes found (0 MiB committed total; 1 protected — re-run outside the sandbox)."
+        );
+        assert_eq!(
+            format_ps_summary_with(&rows, &f, &unreadable(0), false),
+            "4 GPU processes found (0 MiB committed total; 1 protected — re-run elevated for names)."
+        );
+        // No clause at all: neither a count nor a remedy.
+        assert_eq!(
+            format_ps_summary_with(&unprotected_rows(0), &f, &unreadable(0), true),
+            "0 GPU processes found."
         );
     }
 

@@ -11,18 +11,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use hypomnesis::{
-    GpuProcessEntry, SpillReport, SpillTracker, device_info, gpu_processes, process_exists,
+    GpuProcessEntry, SpillReport, SpillTracker, device_info, gpu_process_listing, process_exists,
     snapshot_is_spilling,
 };
 
 use crate::format::{
-    REMEDY_OUTSIDE_SANDBOX, RemedyPurpose, Table, device_name_suffix, duration_ms, format_vram,
-    format_vram_precise, iso8601_utc_millis, json_string, json_string_or_null, json_value_or_null,
-    paged_cell, remedy_text, spill_cell,
+    REMEDY_OUTSIDE_SANDBOX, RemedyPurpose, Table, device_name_suffix, duration_ms, failure_detail,
+    format_vram, format_vram_precise, iso8601_utc_millis, json_string, json_string_or_null,
+    json_value_or_null, paged_cell, remedy_text, spill_cell, with_remedy,
 };
 use crate::ps::{
     PsRow, SortKey, filterable_name, footprint_bytes, matches_any, paged_verdict,
-    ps_row_comparator, resolved_name,
+    ps_row_comparator, remedy_clause, resolved_name,
 };
 use crate::spill::{format_spill_report_with_prefix, write_spill_report_fields};
 
@@ -475,7 +475,7 @@ fn format_watch_header_text(name_width: usize) -> String {
 /// Format one interval's rows as JSON Lines: one `"kind":"sample"`
 /// object per row, newline-terminated, ready to pipe to `jq -c`.
 /// `wall_clock` (captured at the same instant as `t_ms`'s `elapsed`,
-/// just before this interval's `gpu_processes()` call — not after,
+/// just before this interval's `gpu_process_listing()` call — not after,
 /// so the two timestamps in one sample never straddle the query's own
 /// duration) is the same for every row in the interval — formatted
 /// once via [`iso8601_utc_millis`], not per row.
@@ -964,7 +964,9 @@ fn spilling_at_attach_notice(
 
 /// The attach-time stderr warnings for explicit PIDs that name no running
 /// process: one per PID in `explicit` that `listed` (the first sample)
-/// does not hold and `exists` answers `Some(false)` for. A PID in the
+/// does not hold, that is not in `denied` (the PIDs the caller was refused,
+/// which [`denied_pid_notices`] names instead, so one PID never gets both
+/// notices) and that `exists` answers `Some(false)` for. A PID in the
 /// listing plainly exists and is not asked about; `None` ("can't tell")
 /// says nothing. Such a PID is still watched, as before, so a typo is
 /// told apart from a process that merely holds no GPU memory yet — the
@@ -975,14 +977,36 @@ fn spilling_at_attach_notice(
 fn missing_pid_notices(
     explicit: &[u32],
     listed: &[GpuProcessEntry],
+    denied: &[u32],
     exists: impl Fn(u32) -> Option<bool>,
 ) -> Vec<String> {
     explicit
         .iter()
         .filter(|&&pid| !listed.iter().any(|e| e.pid == pid))
+        .filter(|pid| !denied.contains(pid))
         .filter(|&&pid| exists(pid) == Some(false))
         .map(|pid| {
             format!("hmn watch: pid={pid} names no running process; its rows will read 0 MiB")
+        })
+        .collect()
+}
+
+/// The attach-time stderr notices for explicit PIDs the caller was refused
+/// (`denied`, [`hypomnesis::GpuProcessListing::denied_pids`]): one per PID
+/// in `explicit` that `denied` holds, in the order given. A denied PID is
+/// still watched, but its rows read 0 MiB each interval, and the notice
+/// says so once, with the remedy, so it stands alone. A readable PID gets
+/// none.
+#[must_use]
+fn denied_pid_notices(explicit: &[u32], denied: &[u32], outside_sandbox: bool) -> Vec<String> {
+    explicit
+        .iter()
+        .filter(|pid| denied.contains(pid))
+        .map(|pid| {
+            with_remedy(
+                &format!("hmn watch: pid={pid} is unreadable here; its rows will read 0 MiB"),
+                outside_sandbox,
+            )
         })
         .collect()
 }
@@ -1071,7 +1095,7 @@ fn format_followed_set_change(
 }
 
 /// Run the `watch` subcommand: resolve the watched PID set, sample it on
-/// a timer against [`SpillTracker`] + [`gpu_processes`] until
+/// a timer against [`SpillTracker`] + [`gpu_process_listing`] until
 /// `--duration` elapses or Ctrl+C, then print the closing summary.
 ///
 /// Returns `2` immediately on a hard error (device unreachable, or
@@ -1102,13 +1126,22 @@ pub fn run_watch(
     // would read larger than `--interval`.
     let start = std::time::Instant::now();
     let first_wall_clock = SystemTime::now();
-    let first_rows = match gpu_processes(device) {
-        Ok(rows) => rows,
+    let first_listing = match gpu_process_listing(device) {
+        Ok(listing) => listing,
         Err(e) => {
-            eprintln!("hmn: watch failed to query device {device}: {e}");
+            eprintln!(
+                "hmn: watch failed to query device {device}: {}",
+                failure_detail(&e, REMEDY_OUTSIDE_SANDBOX)
+            );
             return std::process::ExitCode::from(2);
         }
     };
+    // The processes the caller was refused. A sandbox does not change
+    // mid-run, so this set is read once, at attach, and every notice about
+    // it is said once; the interval loop lists `entries` only.
+    let denied = first_listing.denied_pids;
+    let first_rows = first_listing.entries;
+    let unreadable = remedy_clause(0, denied.len(), REMEDY_OUTSIDE_SANDBOX);
     // `hmn ps`'s one-snapshot verdict, taken once at attach: the tracker
     // measures growth from its first observation, so it cannot see a spill
     // already under way; this can, and the watch says so.
@@ -1125,15 +1158,20 @@ pub fn run_watch(
     if watched.is_empty() {
         let top = selection.top;
         let criterion = selection.criterion();
+        // Why, when processes were refused: the count and the remedy go
+        // inside the parentheses, so the line says it on its own.
+        let because = unreadable
+            .as_deref()
+            .map_or_else(String::new, |clause| format!("; {clause}"));
         if selection.follow_new {
             eprintln!(
                 "hmn: watch found no GPU processes on device {device} yet (top {top} by \
-                 committed{criterion}); waiting for work to appear"
+                 committed{criterion}{because}); waiting for work to appear"
             );
         } else {
             eprintln!(
                 "hmn: watch found no GPU processes on device {device} to auto-select \
-                 (top {top}{criterion}); re-run with an explicit PID once a workload is running"
+                 (top {top}{criterion}{because}); re-run with an explicit PID once a workload is running"
             );
             return std::process::ExitCode::from(2);
         }
@@ -1183,11 +1221,23 @@ pub fn run_watch(
     if let Some(notice) = spilling_at_attach_notice(device, spilling_at_attach, &first_rows) {
         eprintln!("{notice}");
     }
-    for notice in missing_pid_notices(&selection.explicit, &first_rows, process_exists) {
+    for notice in denied_pid_notices(&selection.explicit, &denied, REMEDY_OUTSIDE_SANDBOX) {
+        eprintln!("{notice}");
+    }
+    for notice in missing_pid_notices(&selection.explicit, &first_rows, &denied, process_exists) {
         eprintln!("{notice}");
     }
     for notice in unmatchable_notices(&first.unmatchable, &mut announced) {
         eprintln!("{notice}");
+    }
+    // `--follow-new` never follows a process it cannot read, and says how
+    // many. With nothing to watch, the "found no GPU processes" line
+    // already carries the count.
+    if selection.follow_new
+        && !watched.is_empty()
+        && let Some(clause) = &unreadable
+    {
+        eprintln!("hmn watch: device {device}: {clause}; they are not followed");
     }
 
     let rows0 = process_sample(
@@ -1223,13 +1273,15 @@ pub fn run_watch(
 
         // Captured together, both right before the query, so t_ms and
         // wall_clock in the emitted sample refer to the same instant
-        // rather than straddling gpu_processes()'s (non-zero, under
+        // rather than straddling gpu_process_listing()'s (non-zero, under
         // load) call duration.
         let elapsed = start.elapsed();
         let wall_clock = SystemTime::now();
-        let rows = match gpu_processes(device) {
-            Ok(rows) => rows,
+        let rows = match gpu_process_listing(device) {
+            Ok(listing) => listing.entries,
             Err(e) => {
+                // Raw `{e}`, not `failure_detail`: attach said the remedy
+                // once, and the sandbox does not change mid-run.
                 eprintln!(
                     "hmn watch: sample failed at +{:.1}s ({e}); skipping interval",
                     elapsed.as_secs_f64()
@@ -2195,12 +2247,46 @@ mod tests {
             _ => Some(true),
         };
         assert_eq!(
-            missing_pid_notices(&[15534, 15503, 999_999, 42], &listed, exists),
+            missing_pid_notices(&[15534, 15503, 999_999, 42], &listed, &[], exists),
             ["hmn watch: pid=999999 names no running process; its rows will read 0 MiB"]
         );
         // Auto-selection has no explicit PIDs: nothing to warn about.
-        let notices = missing_pid_notices(&[], &listed, |_| Some(false));
+        let notices = missing_pid_notices(&[], &listed, &[], |_| Some(false));
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    // --- denied explicit PIDs and the unreadable count ---
+
+    #[test]
+    fn denied_pid_notices_name_each_denied_explicit_pid_in_the_order_given() {
+        assert_eq!(
+            denied_pid_notices(&[7, 3, 9], &[9, 100, 7], true),
+            [
+                "hmn watch: pid=7 is unreadable here; its rows will read 0 MiB — re-run outside the sandbox",
+                "hmn watch: pid=9 is unreadable here; its rows will read 0 MiB — re-run outside the sandbox",
+            ]
+        );
+        assert_eq!(
+            denied_pid_notices(&[7], &[7], false),
+            [
+                "hmn watch: pid=7 is unreadable here; its rows will read 0 MiB — re-run elevated for names"
+            ]
+        );
+        // A readable PID, auto-selection and no denied PID at all get none.
+        for (explicit, denied) in [(&[5, 6][..], &[7, 8][..]), (&[], &[7, 8]), (&[7, 8], &[])] {
+            let notices = denied_pid_notices(explicit, denied, true);
+            assert!(notices.is_empty(), "{notices:?}");
+        }
+    }
+
+    #[test]
+    fn missing_pid_notices_skip_denied_pids() {
+        // `exists` would call both PIDs gone; 999 is denied, so it is not
+        // named, and 998, which is not, is.
+        assert_eq!(
+            missing_pid_notices(&[999, 998], &[], &[999], |_| Some(false)),
+            ["hmn watch: pid=998 names no running process; its rows will read 0 MiB"]
+        );
     }
 
     #[test]

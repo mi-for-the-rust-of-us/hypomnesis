@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **macOS enumeration and names inside a sandbox that denies `process-info`**
+  (`src/gpu/metal.rs`) — when `proc_listpids` is refused, `sysctl(KERN_PROC_ALL)`
+  enumerates the processes. A name comes from `proc_pidpath`, and from the kernel's `p_comm`
+  (cut at 16 bytes) only where `proc_pidpath` is refused, never for a process that is gone.
+  A per-PID ledger read is bytes, denied, gone (`ESRCH`) or failed, and only a refusal (`EPERM`)
+  counts as denied. Where libproc works, `proc_listpids` enumerates and `proc_pidpath` names.
+
+- **`gpu_process_listing`, `GpuProcessListing` and `HypomnesisError::ProcessListDenied`**
+  (`src/gpu/mod.rs`, `src/snapshot.rs`, `src/error.rs`) — `gpu_process_listing(device_index)`
+  returns the rows `gpu_processes` returns and `denied_pids`, the PIDs whose GPU memory the
+  platform refused to let the caller read, sorted by `pid`. On macOS it returns
+  `ProcessListDenied { denied }` when at least one process was refused and none other than the
+  caller's could be read; on Linux and Windows `denied_pids` is always empty and the error is
+  never returned. The error's `Display` states the count and carries no remedy. `gpu_processes`
+  keeps its signature and returns the same error; a partial denial, where the sandbox's own
+  processes are readable, stays an `Ok` list.
+
+- **`hmn ps` counts the processes a macOS sandbox hides** (`src/bin/hmn/ps.rs`, `format.rs`,
+  `main.rs`) — the summary line reads `907 unreadable, 1 protected — re-run outside the
+  sandbox` (one remedy for both counts; with nothing protected, `907 unreadable — re-run
+  outside the sandbox`), and a refused process list is a failed device: `hmn: ps failed to query
+  device 0: process list unreadable (N refused, none other than the caller's could be read) —
+  re-run outside the sandbox` (` (skipped)` appended without `--device`), where a sandbox that
+  denies only the ledger read printed `0 GPU processes found.`. `--pid N` counts only N among the
+  refused processes, and `--exit-status` exits `2`, not `1`, for an empty listing in which a
+  process the filters could match was unreadable. The count goes to stderr; `--json` and the table
+  carry no field for it. On Windows and Linux the text is `N protected — re-run elevated for
+  names`, and no process is ever refused there.
+
+- **`hmn watch` notices the processes a macOS sandbox hides** (`src/bin/hmn/watch.rs`,
+  `format.rs`, `main.rs`) — at attach, an explicit PID the caller was refused gets
+  `hmn watch: pid=N is unreadable here; its rows will read 0 MiB — re-run outside the sandbox`,
+  once, and is still watched; it is never also reported as naming no running process.
+  `--follow-new` prints `hmn watch: device D: N unreadable — re-run outside the sandbox; they
+  are not followed` once, and when nothing was selected, `found no GPU processes` carries the same
+  count and remedy inside its parentheses, so the line says why. A refused
+  process list at attach is `hmn: watch failed to query device D: process list unreadable (…) —
+  re-run outside the sandbox`; the per-interval `sample failed` line repeats no remedy. On
+  Windows and Linux no process is ever refused, so none of these lines appears.
+
 ### Changed
 
 - **The SPILL and per-PID `PAGED` cells read `n/a` on Linux and macOS** (`src/bin/hmn/format.rs`,
@@ -16,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (pre-`WDDM 2.0`, a non-NVIDIA adapter, a `PDH` hiccup, a build without `pdh`). The platform is
   decided at compile time through one core, `format::spill_cell_for`, that both cells share.
   Text output only: `--json` keeps `null`. From the v0.2.13 macOS field check, finding F6
-  ([`__reports__/field_check_v0213/01-findings_v1.md`](__reports__/field_check_v0213/01-findings_v1.md)).
+  (`field_check_v0213/01-findings_v1.md` at `f03298a7bb`).
 
 - **On macOS, `hmn ps` and `hmn watch` advise `re-run outside the sandbox`, not elevation**
   (`src/bin/hmn/format.rs`, `ps.rs`, `watch.rs`, `main.rs`) — the `hmn ps` summary's clause
@@ -24,14 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `re-run outside the sandbox to identify`, where both advised an elevation that does not change
   what a macOS sandbox withholds. One compile-time selection, `format::remedy_text`, picks the
   text; the Windows and Linux text is unchanged, byte for byte. From the
-  [v0.2.13 macOS field check](__reports__/field_check_v0213/01-findings_v1.md).
+  v0.2.13 macOS field check (`field_check_v0213/01-findings_v1.md` at `f03298a7bb`).
 
 - **On macOS the sandbox, not process ownership, decides what `hmn` can read** (`README.md`,
   `docs/FAQ.md`, `ROADMAP.md`, rustdoc, `hmn --help`) — unsandboxed, `hmn ps` lists every user's
   processes with no elevation, so no macOS text advises `sudo`; README Limitations item 9 states
   what a sandbox refuses and what `hmn ps` then prints.
-  From the [v0.2.13 macOS field check](__reports__/field_check_v0213/01-findings_v1.md),
+  From the v0.2.13 macOS field check (`field_check_v0213/01-findings_v1.md` at `f03298a7bb`),
   F1.
+
+- **On macOS, `gpu_processes` returns an error where it returned an empty list**
+  (`src/gpu/metal.rs`, `src/gpu/mod.rs`, `src/error.rs`) — when the `graphics_footprint` entry of
+  the ledger template does not resolve, or when no other process's ledger read succeeds and none
+  is refused, it returns `NoGpuSource`, where it returned an empty list; `hmn ps` then exits `2`,
+  where it printed `0 GPU processes found.` and exited `0`, unsandboxed included. When the
+  process list is enumerated but no process other than the caller's can be read, it returns
+  `ProcessListDenied`, where it returned `NoGpuSource` or, under a sandbox that denies only the
+  ledger read, an empty list. `gpu_process_listing` returns the same errors. `HypomnesisError` is
+  `#[non_exhaustive]`, so a `match` on it has a wildcard arm.
 
 ### Fixed
 
@@ -42,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NoGpuSource`. The answer also holds in a sandbox that denies `process-info*`, since the Metal
   count comes from `sysctl`. On macOS the `NoGpuSource` text now names Metal, NVML and
   `nvidia-smi`; on Windows and Linux it is unchanged. From the
-  [v0.2.13 macOS field check](__reports__/field_check_v0213/01-findings_v1.md), F2.
+  v0.2.13 macOS field check (`field_check_v0213/01-findings_v1.md` at `f03298a7bb`), F2.
 
 - **`hmn ps` states each device it skipped, and exits `2` when every device failed**
   (`src/bin/hmn/ps.rs`, `main.rs`) — without `--device`, a device whose query fails now prints
@@ -67,6 +119,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware is untested. A zombie, exited but not yet reaped, now reads `Some(true)` (it read
   `Some(false)`), as on Linux. Issue #3, item 2 of
   [`docs/roadmap-v0.2.14.md`](docs/roadmap-v0.2.14.md).
+
+### Documentation
+
+- **The macOS limitation is stated once, and every other site points to it** (`README.md`,
+  `docs/FAQ.md`, `src/lib.rs`, `src/gpu/mod.rs`, `src/bin/hmn/main.rs`) — README Limitations
+  item 9 says that the sandbox, not process ownership, decides what `hmn` can read, that
+  `hmn` measures what is permitted and counts the rest, and that `hmn ps` ends its summary
+  with `N unreadable — re-run outside the sandbox`. The FAQ, the `--help` text and the
+  rustdoc point to it. A bare `?` in the NAME column on macOS means both name lookups
+  failed or the process is gone, and the capability table's Fallback cell reads
+  `enumeration, names and lookups try libproc first, then sysctl`.
 
 ## [0.2.13] - 2026-09-30
 

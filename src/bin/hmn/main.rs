@@ -155,9 +155,9 @@ mod watch;
                   SYSTEM/LOCAL SERVICE/NETWORK SERVICE, a PPL-protected process, or (rarely) \
                   the snapshot API itself failing. None of these are intrinsically \
                   malicious, but on a single-user desktop an unexpected one holding \
-                  substantial VRAM is worth investigating. On macOS a bare `?` means a sandbox \
-                  withheld the name, and elevation does not change that; see README \
-                  Limitations, item 9. The summary line's protected-count \
+                  substantial VRAM is worth investigating. On macOS a bare `?` means both name \
+                  lookups failed or the process is gone, and elevation does not change \
+                  that; see README Limitations, item 9. The summary line's protected-count \
                   parenthetical counts `[protected]`/absent-name/the rare nvidia-smi-fallback \
                   literal `?` — not `[exited]`, since elevation can't help a process that's \
                   already gone. On macOS the same clause reads \
@@ -175,7 +175,8 @@ mod watch;
                   resident-bytes semantics as Windows `WorkingSetSize` and Linux `VmRSS`.\n\
                   - macOS: the sandbox, not process ownership, decides what `hmn` can read — \
                   unsandboxed, every user's processes are listed and elevation does not \
-                  help; see README Limitations, item 9."
+                  help. `hmn` counts the processes it cannot read and exits `2` under \
+                  `ps --exit-status` when it cannot tell; see README Limitations, item 9."
 )]
 struct Cli {
     /// Subcommand. Omitted for the default device-summary view.
@@ -201,13 +202,15 @@ enum Commands {
     /// (compositor, browsers, compute, etc.). On macOS: every
     /// process holding `graphics_footprint` ledger bytes that the
     /// sandbox lets it read (the sandbox, not process ownership, decides;
-    /// see README Limitations, item 9). See `hmn --help`
+    /// see README Limitations, item 9); the processes it cannot read are
+    /// counted on the summary line as unreadable. See `hmn --help`
     /// Limitations for the full per-platform breakdown.
     Ps {
         /// Keep only this PID. Repeatable (`--pid A --pid B`): a process
         /// matching any of them is listed — a launcher's wrapper and its
         /// GPU child, or two chained runs. The PIDs are echoed on the
-        /// summary line.
+        /// summary line. An unreadable process counts as a possible match,
+        /// so `--pid N` reports only N among the unreadable ones.
         #[arg(long = "pid", value_name = "PID")]
         pids: Vec<u32>,
         /// Filter to a single GPU index. Default: every device reported
@@ -230,10 +233,12 @@ enum Commands {
         /// Keep only processes whose name contains PATTERN, ignoring
         /// case (`--filter canvas` matches `canvas` and `Canvas.exe`) —
         /// the same rule as `hmn watch --filter`. Repeatable: a name
-        /// matching any one pattern qualifies. A process whose name
-        /// cannot be resolved (`?`, `[protected]`, `[exited]`) cannot
-        /// match; the summary line counts those rather than dropping them
-        /// silently. The patterns are echoed on the summary line.
+        /// matching any one pattern qualifies. On macOS a name read from
+        /// the kernel's `p_comm` is cut at 16 bytes, and a pattern cannot
+        /// match past the cut. A process whose name cannot be resolved
+        /// (`?`, `[protected]`, `[exited]`) cannot match; the summary line
+        /// counts those rather than dropping them silently. The patterns
+        /// are echoed on the summary line.
         #[arg(long = "filter", value_name = "PATTERN", value_parser = parse_filter_pattern)]
         filters: Vec<String>,
         /// Display order: `dedicated` ("who do I kill to free VRAM?",
@@ -270,7 +275,9 @@ enum Commands {
         /// matched. A device named by `--device` that cannot be listed is
         /// still exit `2`. A listing where every device failed is also `2`,
         /// never `1`, and so is an empty listing that skipped a failed
-        /// device, since `1` means nothing matched on every device queried.
+        /// device or left unreadable a process the filters could match,
+        /// since `1` means nothing matched on every device queried and no
+        /// process the filters could match was unreadable.
         #[arg(long)]
         exit_status: bool,
     },
@@ -332,11 +339,13 @@ enum Commands {
     /// it does not auto-stop on this basis, use `--duration` or Ctrl+C.
     /// At attach it does check each explicit PID: one that names no
     /// running process gets a one-line warning on stderr (since
-    /// v0.2.13), and is still watched. Spill is measured as shared-memory
-    /// growth above the first sample, so a spill already under way at
-    /// attach is not counted; since v0.2.13 a warning says so at attach
-    /// and the closing summary repeats it (`hmn ps` shows the current
-    /// state).
+    /// v0.2.13), and so does one that is unreadable here (a macOS
+    /// sandbox's refusal: its rows read 0 MiB); both are still watched.
+    /// `--follow-new` says how many processes it cannot follow. Spill is
+    /// measured as shared-memory growth above the first sample, so a
+    /// spill already under way at attach is not counted; since v0.2.13 a
+    /// warning says so at attach and the closing summary repeats it
+    /// (`hmn ps` shows the current state).
     /// If the OS recycles a watched PID onto a different process
     /// mid-watch, a resolved-name change is used as a best-effort signal
     /// to reset that row's baseline rather than mixing two processes'
@@ -392,9 +401,10 @@ enum Commands {
         /// resolve (`[protected]`, `[exited]`) keeps matching on the last
         /// name it resolved to; a process whose name never resolves
         /// cannot match, and is announced once on stderr rather than
-        /// dropped silently. The active patterns appear on the stderr
-        /// header line. Combining this with explicit PID(s) is a hard
-        /// error (exit `2`).
+        /// dropped silently. On macOS a name read from the kernel's
+        /// `p_comm` is cut at 16 bytes, and a pattern cannot match past
+        /// the cut. The active patterns appear on the stderr header line.
+        /// Combining this with explicit PID(s) is a hard error (exit `2`).
         #[arg(long = "filter", value_name = "PATTERN", value_parser = parse_filter_pattern)]
         filters: Vec<String>,
         /// Auto-select mode only: consider only processes whose total

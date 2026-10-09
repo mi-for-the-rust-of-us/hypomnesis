@@ -154,7 +154,7 @@ fn gpu_processes_returns_result_or_no_gpu_source() {
     // On a runner without NVIDIA / nvidia-smi, gpu_processes(0) typically
     // returns Err(NoGpuSource) (or, on Linux and Windows,
     // DeviceIndexOutOfRange when bounds_check catches a count source; on
-    // macOS only NoGpuSource is accepted). On a host with
+    // macOS NoGpuSource or ProcessListDenied are accepted). On a host with
     // NVIDIA, returns Ok(Vec) — possibly empty on Linux (NVML compute-only,
     // no CUDA process active) or essentially never empty on Windows (PDH
     // surfaces every GPU memory holder, compositor included). We assert
@@ -190,12 +190,18 @@ fn gpu_processes_returns_result_or_no_gpu_source() {
             // Expected on hosted runners with no NVIDIA hardware. On macOS
             // the Metal count is 1, so index 0 is never out of range. This
             // arm runs there only when Metal cannot answer index 0 (inside a
-            // sandbox), so it catches an off-by-one in bounds_check's Metal
-            // arm only in a sandboxed run; the unsandboxed guard is the unit
-            // test `bounds_check_metal_arm_admits_index_0_and_rejects_index_1`.
+            // sandbox): `ProcessListDenied` when the sandbox refuses every
+            // process but the caller's, `NoGpuSource` when libproc and
+            // `sysctl` are both refused. It catches an off-by-one in
+            // bounds_check's Metal arm only in a sandboxed run; the
+            // unsandboxed guard is the unit test
+            // `bounds_check_metal_arm_admits_index_0_and_rejects_index_1`.
             #[cfg(target_os = "macos")]
             assert!(
-                matches!(e, HypomnesisError::NoGpuSource),
+                matches!(
+                    e,
+                    HypomnesisError::NoGpuSource | HypomnesisError::ProcessListDenied { .. }
+                ),
                 "unexpected error from gpu_processes(0): {e:?}"
             );
             #[cfg(not(target_os = "macos"))]

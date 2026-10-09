@@ -243,7 +243,7 @@ Every `unsafe` block must be **scoped, annotated, and feature-gated**.
 | Feature gate | Accepted `unsafe` scope |
 |---|---|
 | (always, on `target_os = "windows"`) | `K32GetProcessMemoryInfo` extern via `unsafe extern "system"` block in `src/ram.rs` |
-| (always, on `target_os = "macos"`) | libSystem syscalls (`task_info`, `ledger`, `sysctlbyname`, `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID)` (the MIB form), `proc_listpids`, `proc_pidpath`) in `src/ram.rs` + `src/gpu/metal.rs`. The `kinfo_proc` byte parser behind the MIB call lives in `src/gpu/kinfo.rs` with no `unsafe`, so the `unsafe` call stays in `src/gpu/metal.rs` |
+| (always, on `target_os = "macos"`) | libSystem syscalls (`task_info`, `ledger`, `sysctlbyname`, `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID)` and `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_ALL)` (the MIB form), `proc_listpids`, `proc_pidpath`) in `src/ram.rs` + `src/gpu/metal.rs`. The `kinfo_proc` byte parser behind both MIB calls lives in `src/gpu/kinfo.rs` with no `unsafe`, so the `unsafe` calls stay in `src/gpu/metal.rs` |
 | `nvml` | NVML dynamic load and FFI in `src/gpu/nvml.rs` |
 | `dxgi` | DXGI COM calls in `src/gpu/dxgi.rs` (Windows-only) |
 | `pdh` | PDH counter API (`PdhOpenQueryW` / `PdhEnumObjectItemsW` / `PdhAddCounterW` / `PdhCollectQueryData` / `PdhGetFormattedCounterValue`) for the `GPU Process Memory` and `GPU Adapter Memory` counter sets, plus `OpenProcess` + `QueryFullProcessImageNameW` name lookup and (v0.2.8) `CreateToolhelp32Snapshot` + `Process32FirstW`/`Process32NextW` as its batched fallback, in `src/gpu/pdh.rs` (Windows-only). The v0.2.5 spill module (`src/spill.rs`) contains **no** `unsafe` of its own — it delegates to this backend. |

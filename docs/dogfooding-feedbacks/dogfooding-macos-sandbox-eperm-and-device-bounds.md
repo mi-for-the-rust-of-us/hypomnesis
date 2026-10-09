@@ -384,6 +384,6 @@ with `hmn`. `hmn ps`'s own unsandboxed listing of `_windowserver` corroborates t
 - [`docs/roadmap-v0.2.14.md`](../roadmap-v0.2.14.md): the fix plan for these requests, with the
   full doc-site list.
 - XNU `bsd/kern/sys_generic.c`, `ledger()`: the `mac_proc_check_ledger` hook, with no uid check.
-- Findings briefing and evidence: `__reports__/field_check_v0213/01-findings_v1.md` and
-  `__reports__/field_check_v0213/evidence/`. The probes are `probes/p.py` (`proc_pidpath`),
+- Findings briefing and evidence: `field_check_v0213/01-findings_v1.md` at `f03298a7bb` and
+  `field_check_v0213/evidence/` at `f03298a7bb`. The probes are `probes/p.py` (`proc_pidpath`),
   `probes/l.py` (`ledger` scan) and `probes/sandbox_probe.py` (sandbox on/off).

@@ -1,7 +1,0 @@
-[package]
-name = "verify_pe"
-version = "0.0.0"
-edition = "2024"
-[workspace]
-[dependencies]
-hypomnesis = { path = "../../../../..", default-features = false, features = ["metal"] }

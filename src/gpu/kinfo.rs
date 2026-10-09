@@ -2,9 +2,10 @@
 
 //! macOS `kinfo_proc` records, read as plain bytes.
 //!
-//! `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` answers with one
-//! `struct kinfo_proc` per process. This module parses those records
-//! from a byte buffer at fixed offsets, and holds the rule that turns a
+//! `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` answers with the one
+//! `struct kinfo_proc` of a process, and `KERN_PROC_ALL` with one per
+//! process in the table. This module parses those records from a byte
+//! buffer at fixed offsets, and holds the rule that turns a
 //! `proc_pidpath` result and a `KERN_PROC_PID` result into the answer
 //! of `process_exists`. It has no `unsafe`: the `sysctl` call itself is
 //! in `src/gpu/metal.rs`.
@@ -29,7 +30,7 @@
 //!   untested hardware).
 //!
 //! The measurements are in
-//! `__reports__/field_check_v0213/evidence/kinfo_proc_layout.md`.
+//! `field_check_v0213/evidence/kinfo_proc_layout.md` at `f03298a7bb`.
 
 /// `sizeof(struct kinfo_proc)`, in bytes.
 pub(super) const KINFO_PROC_SIZE: usize = 648;
@@ -50,9 +51,16 @@ pub(super) const P_COMM_SIZE: usize = 17;
 pub(super) const ESRCH: i32 = 3;
 
 /// `ENOMEM` from `<errno.h>`: the buffer is too small. `sysctl` answers
-/// it when the record does not fit the buffer, and then copies nothing
-/// and writes back a `len` of 0.
+/// it when the records do not all fit the buffer, and writes back a `len`
+/// of 0. [`classify_kern_proc_pid`] and [`classify_kern_proc_all`] answer
+/// it.
 pub(super) const ENOMEM: i32 = 12;
+
+/// `EPERM` from `<errno.h>`: the caller's sandbox refuses the call.
+/// `ledger`, `proc_listpids`, `proc_pidpath` and `sysctl` answer it that
+/// way.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(super) const EPERM: i32 = 1;
 
 /// `CTL_KERN` from `<sys/sysctl.h>`: the top-level kernel MIB.
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -66,6 +74,10 @@ pub(super) const KERN_PROC: i32 = 14;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(super) const KERN_PROC_PID: i32 = 1;
 
+/// `KERN_PROC_ALL` from `<sys/sysctl.h>`: select every process.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(super) const KERN_PROC_ALL: i32 = 0;
+
 /// The fields of one `kinfo_proc` record this crate reads.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct KinfoRecord {
@@ -73,6 +85,17 @@ pub(super) struct KinfoRecord {
     pub(super) pid: i32,
     /// `kp_proc.p_comm`, the bytes before its first NUL (at most 16).
     pub(super) comm: Vec<u8>,
+}
+
+/// What one `KERN_PROC_ALL` fill said.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum KernProcAllAttempt {
+    /// The call succeeded with these records.
+    Records(Vec<KinfoRecord>),
+    /// The call failed with `ENOMEM`: the table outgrew the buffer.
+    Retry,
+    /// The call failed with another `errno`, or its answer is unusable.
+    Failed,
 }
 
 /// What `proc_pidpath` said about a PID.
@@ -178,6 +201,33 @@ pub(super) fn classify_kern_proc_pid(
         Some([record]) if record.pid == pid => PidLookup::Record,
         Some(_) | None => PidLookup::Unusable,
     }
+}
+
+/// Classify the result of one `KERN_PROC_ALL` fill: its return code `rc`,
+/// the `errno` it left, its buffer and the `len` it wrote back.
+///
+/// `rc` is read first, and on a failed call `buf` and `len` are never read:
+/// a fill that fails with `ENOMEM` has copied the whole records that fit
+/// and written back a `len` of 0, so its buffer holds records that must not
+/// be parsed. `ENOMEM` is `Retry`, any other `errno` is `Failed`. On success
+/// the first `len` bytes must be whole records (`len` past the buffer, or a
+/// partial record, is `Failed`).
+pub(super) fn classify_kern_proc_all(
+    rc: i32,
+    errno: i32,
+    buf: &[u8],
+    len: usize,
+) -> KernProcAllAttempt {
+    if rc != 0 {
+        return if errno == ENOMEM {
+            KernProcAllAttempt::Retry
+        } else {
+            KernProcAllAttempt::Failed
+        };
+    }
+    buf.get(..len)
+        .and_then(parse_kinfo_records)
+        .map_or(KernProcAllAttempt::Failed, KernProcAllAttempt::Records)
 }
 
 /// Decide whether a PID exists: `proc_pidpath` first, then `sysctl`
@@ -357,6 +407,81 @@ mod tests {
         assert_eq!(
             classify_kern_proc_pid(0, 0, &two, 1296, 1),
             PidLookup::Unusable
+        );
+    }
+
+    #[test]
+    fn classify_kern_proc_all_whole_records_with_rc_zero_are_records() {
+        let mut two = record(1, b"launchd");
+        two.extend_from_slice(&record(77, b"WindowServer"));
+        assert_eq!(
+            classify_kern_proc_all(0, 0, &two, 1296),
+            KernProcAllAttempt::Records(vec![
+                KinfoRecord {
+                    pid: 1,
+                    comm: b"launchd".to_vec()
+                },
+                KinfoRecord {
+                    pid: 77,
+                    comm: b"WindowServer".to_vec()
+                },
+            ])
+        );
+        // Only the first `len` bytes are records.
+        assert_eq!(
+            classify_kern_proc_all(0, 0, &two, 648),
+            KernProcAllAttempt::Records(vec![KinfoRecord {
+                pid: 1,
+                comm: b"launchd".to_vec()
+            }])
+        );
+    }
+
+    #[test]
+    fn classify_kern_proc_all_enomem_is_retry_even_when_the_buffer_holds_records() {
+        // `ENOMEM` is `Retry` whatever the buffer holds.
+        let mut two = record(1, b"launchd");
+        two.extend_from_slice(&record(77, b"WindowServer"));
+        assert_eq!(
+            classify_kern_proc_all(-1, 12, &two, 0),
+            KernProcAllAttempt::Retry
+        );
+        assert_eq!(
+            classify_kern_proc_all(-1, 12, &two, 1296),
+            KernProcAllAttempt::Retry
+        );
+    }
+
+    #[test]
+    fn classify_kern_proc_all_a_failed_call_other_than_enomem_is_failed() {
+        let zeroed = [0_u8; 648];
+        // `EPERM`, `ESRCH` and `EINVAL`.
+        assert_eq!(
+            classify_kern_proc_all(-1, 1, &zeroed, 648),
+            KernProcAllAttempt::Failed
+        );
+        assert_eq!(
+            classify_kern_proc_all(-1, 3, &zeroed, 0),
+            KernProcAllAttempt::Failed
+        );
+        assert_eq!(
+            classify_kern_proc_all(-1, 22, &zeroed, 0),
+            KernProcAllAttempt::Failed
+        );
+    }
+
+    #[test]
+    fn classify_kern_proc_all_an_unusable_success_is_failed() {
+        let one = record(1, b"launchd");
+        // A `len` past the buffer.
+        assert_eq!(
+            classify_kern_proc_all(0, 0, &one, 1296),
+            KernProcAllAttempt::Failed
+        );
+        // A partial record.
+        assert_eq!(
+            classify_kern_proc_all(0, 0, &one, 647),
+            KernProcAllAttempt::Failed
         );
     }
 

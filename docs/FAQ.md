@@ -284,19 +284,23 @@ when either shows the full one. An unresolved row means
 `/proc/<pid>/comm` was unreadable — usually a genuine cross-user permission
 wall, not a false one the way Windows' old `OpenProcess`-only path was; run
 as the owning user or with `sudo` to resolve it. On macOS a name is `?`
-when a sandbox withheld `proc_pidpath`; see
-[README Limitations, item 9](../README.md#binary-hmn). Both platforms still
-render an unresolved row as a bare `?` (no `[exited]`/`[protected]` split)
-— there is no equivalent false-wall to collapse there the way there was on
-Windows.
+when the process is gone, when the path lookup fails for a reason other
+than a refusal, or when `proc_pidpath` and `KERN_PROC_PID` are both
+refused or give no usable name (empty, or not UTF-8). Where only the path
+lookup is refused, the name is the kernel's `p_comm`, cut at 16 bytes, so
+`--filter` cannot match past the cut; see
+[README Limitations, item 9](../README.md#binary-hmn). Both platforms
+still render an unresolved row as a bare `?` (no `[exited]`/`[protected]`
+split) — there is no equivalent false-wall to collapse there the way there
+was on Windows.
 
 The distinction is deliberately surfaced because it is security-relevant: a
 `[protected]` row (or, on Linux, a bare `?`) holding substantial `VRAM`
 that *still* doesn't resolve under elevation is one of — another user's
 process, `SYSTEM`, a `PPL`-protected process, or (rarely) the snapshot API
 itself failing — and on a single-user desktop an unexpected one is worth
-investigating. On macOS a bare `?` means a sandbox withheld the name, and
-elevation does not change that; see
+investigating. On macOS a bare `?` means both name lookups failed or the
+process is gone, and elevation does not change that; see
 [README Limitations, item 9](../README.md#binary-hmn). Note that
 **measurement itself never needs elevation**: the `PDH` counters, including
 everything `hmn spill` reads, are readable unprivileged; elevation only
@@ -305,7 +309,10 @@ improves *name resolution*. The
 only true `[protected]`/unresolved rows — `[exited]` rows are deliberately
 excluded, since elevation cannot help a process that has already exited.
 On macOS the clause reads `(N protected — re-run outside the sandbox)`: a
-macOS name is withheld by a sandbox, and elevation does not lift it.
+sandbox withholds the name, and elevation does not lift it. The processes a
+sandbox hides altogether are counted in the same clause as
+`(N unreadable — re-run outside the sandbox)`, joined with the `protected`
+count by a comma when both are non-zero.
 
 A Seatbelt profile that also denies `process-info*` to the caller itself
 (`(deny process-info*)` with no `(allow process-info* (target self))`)

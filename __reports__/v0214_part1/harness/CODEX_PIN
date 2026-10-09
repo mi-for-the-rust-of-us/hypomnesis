@@ -1,4 +1,0 @@
-source: https://raw.githubusercontent.com/openai/codex/696b4502dfaacd91133c3691a23dc91ae3b14bc9/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
-commit: 696b4502dfaacd91133c3691a23dc91ae3b14bc9
-sha256: 5103332ddb8885ee5e1926de6c0ef23a61f4e55e31297506ae05fa4e0b24ba74
-license: Apache-2.0 (https://github.com/openai/codex/blob/696b4502dfaacd91133c3691a23dc91ae3b14bc9/LICENSE); NOTICE: OpenAI Codex, Copyright 2025 OpenAI
