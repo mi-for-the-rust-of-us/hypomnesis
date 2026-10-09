@@ -3,9 +3,9 @@
 > *Measure what a sandbox allows, say what it forbids, and stop reporting an unreadable list as
 > an empty one.*
 
-**Status: accepted — shipping as three PRs.** The maintainer approved implementation on
-2026-10-02 ([issue #3 comment](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/3#issuecomment-5947395182));
-PR A, this documentation, goes first (see *PR split*), and there is no version bump until release.
+**Status: ✅ shipped 2026-10-09.** The maintainer approved implementation on 2026-10-02
+([issue #3 comment](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/3#issuecomment-5947395182));
+it landed as three PRs, #6 (this documentation), #7 (part 1) and #8 (part 2), see *PR split*.
 
 ---
 
@@ -34,7 +34,8 @@ Five behaviour changes are deliberate. Each turns a silent wrong answer into a s
 - `hmn ps --exit-status` also exits `2`, not `1`, when nothing is listed and a
   tried device failed;
 - `gpu_processes` returns `NoGpuSource`, not an empty list, when the `graphics_footprint`
-  template index does not resolve, so `hmn ps` exits `2` on such a host, unsandboxed included,
+  template index does not resolve (or when no other process's read succeeds, none is refused
+  and a read fails), so `hmn ps` exits `2` on such a host, unsandboxed included,
   where v0.2.13 prints `0 GPU processes found.` and exits `0`.
 
 One request is **not** in this release: making the JSON `spilled` field `null` when spill is not

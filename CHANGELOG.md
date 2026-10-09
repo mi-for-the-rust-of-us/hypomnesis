@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-10-09
+
+Answers a field check of v0.2.13 on Apple Silicon
+([issue #3](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/3),
+[report](docs/dogfooding-feedbacks/dogfooding-macos-sandbox-eperm-and-device-bounds.md)), contributed
+by contributor [@LittleCoinCoin](https://github.com/LittleCoinCoin) in three PRs (#6, #7, #8). On macOS the sandbox, not process ownership, decides
+what `hmn` can read: unsandboxed, every user's processes are listed, and the old `sudo` advice is
+gone. Inside a sandbox, `hmn` now measures what is permitted and counts the rest
+(`N unreadable — re-run outside the sandbox`), through a new `gpu_process_listing` and
+`HypomnesisError::ProcessListDenied`, with `sysctl` enumeration where libproc is refused. On every
+platform, `hmn ps` states each device it skips and exits `2` when none could be queried, where it
+printed an empty table. The SPILL and `PAGED` cells read `n/a` where spill cannot exist, and
+`process_exists(0)` finds `kernel_task`. Plan: [`docs/roadmap-v0.2.14.md`](docs/roadmap-v0.2.14.md).
+
 ### Added
 
 - **macOS enumeration and names inside a sandbox that denies `process-info`**
@@ -977,7 +991,8 @@ function bodies are placeholders that compile and pass clippy under
 - **`README.md`** — project overview with badges (CI, crates.io, docs.rs, MSRV, license, unsafe-deny, NVIDIA NVML+DXGI), install, usage, capability matrix, feature flags, license, and development conventions. Mirrors the structure used in [`anamnesis/README.md`](https://github.com/PCfVW/anamnesis/blob/main/README.md).
 - **`[package.metadata.docs.rs]`** — docs.rs builds with `all-features = true` and targets both `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`, exposing the Windows-only `dxgi` module on docs.rs alongside the cross-platform `nvml` path.
 
-[Unreleased]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.13...HEAD
+[Unreleased]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.14...HEAD
+[0.2.14]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.10...v0.2.11
