@@ -198,7 +198,7 @@ hmn --json                   # same data as a JSON array
 hmn ps                       # all GPU processes — discovery command
 hmn ps --pid 12345           # filter to one PID (repeatable since v0.2.13: --pid A --pid B)
 hmn ps --filter canvas       # processes whose name contains "canvas", any case (v0.2.13)
-hmn ps --filter canvas --exit-status   # exit 1 if nothing listed (2 if a device failed or a process the filters could match was unreadable): "is my job on the GPU?" (v0.2.13)
+hmn ps --filter canvas --exit-status   # exit 1 if nothing listed (2 if a device failed, the devices could not be counted, or a process the filters could match was unreadable): "is my job on the GPU?" (v0.2.13)
 hmn ps --device 0            # filter to one GPU on multi-GPU rigs (exit 2 if it can't be listed; plain `hmn ps` exits 2 when every device failed)
 hmn ps --json                # scriptable output
 hmn ps --sort total           # order by dedicated + shared instead of dedicated alone

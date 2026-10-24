@@ -57,21 +57,49 @@ mod kinfo;
 /// On Windows the count uses `NVML`; if `NVML` is unavailable, the
 /// `DXGI` fallback counts NVIDIA adapters with non-zero dedicated `VRAM`.
 ///
+/// The two errors draw the line between "no GPU here" and "can't tell"
+/// (since v0.2.15). [`HypomnesisError::NoGpuSource`] means no count source
+/// is installed — no `NVML` library to load, as on a machine without an
+/// NVIDIA driver — so a caller may read it as zero GPUs, and `hmn ps` and
+/// [`crate::Snapshot::all`] do. [`HypomnesisError::Nvml`] means the `NVML`
+/// library loaded but could not start or count (for example
+/// `nvmlInit_v2` returned `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a
+/// driver upgrade without a reboot), so the GPUs may be there, unreadable;
+/// reading it as zero GPUs would report a broken driver as an idle machine.
+///
 /// # Errors
 ///
 /// Returns [`HypomnesisError::NoGpuSource`] if no enumeration backend
-/// is enabled, or if every enabled backend failed to report a count.
-#[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
+/// is enabled, or if no enabled backend reported a count and `NVML` is
+/// not installed.
+/// Returns [`HypomnesisError::Nvml`] if no enabled backend reported a
+/// count and the `NVML` library loaded but could not start or count.
 pub fn device_count() -> Result<u32> {
+    backend_count().map_err(no_count_error)
+}
+
+/// The first device count a backend reports, in [`device_count`]'s
+/// priority order (Metal on macOS, then `NVML`, then `DXGI` on Windows),
+/// or, when none does, `NVML`'s failure detail if its library loaded but
+/// could not start or count (`None` when `NVML` is absent or not
+/// compiled in). [`device_count`] and [`bounds_check`] both walk the
+/// backends through here, so the bound an index is checked against is the
+/// count `hmn` shows.
+#[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
+fn backend_count() -> std::result::Result<u32, Option<String>> {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     if let Some(count) = metal::device_count() {
         return Ok(count);
     }
 
     #[cfg(feature = "nvml")]
-    if let Some(count) = nvml::device_count() {
-        return Ok(count);
-    }
+    let nvml_failure = match nvml::device_count() {
+        nvml::NvmlCount::Counted(count) => return Ok(count),
+        nvml::NvmlCount::Absent => None,
+        nvml::NvmlCount::Broken(detail) => Some(detail),
+    };
+    #[cfg(not(feature = "nvml"))]
+    let nvml_failure: Option<String> = None;
 
     #[cfg(all(windows, feature = "dxgi"))]
     if let Some(count) = dxgi::device_count() {
@@ -82,7 +110,16 @@ pub fn device_count() -> Result<u32> {
     // counting via `nvidia-smi -L` is more brittle than NVML/DXGI and
     // adds a subprocess invocation for what's typically a metadata call.
 
-    Err(HypomnesisError::NoGpuSource)
+    Err(nvml_failure)
+}
+
+/// The error for "no backend reported a count": [`HypomnesisError::Nvml`]
+/// with `NVML`'s detail when its library loaded but could not start or
+/// count, else [`HypomnesisError::NoGpuSource`] (see [`device_count`] for
+/// what each means to a caller).
+#[must_use]
+fn no_count_error(nvml_failure: Option<String>) -> HypomnesisError {
+    nvml_failure.map_or(HypomnesisError::NoGpuSource, HypomnesisError::Nvml)
 }
 
 /// Device-wide info for a specific GPU index (`NVML`-canonical ordering).
@@ -106,8 +143,11 @@ pub fn device_count() -> Result<u32> {
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `index` is past
 /// the device count reported by `NVML`, `DXGI` or `Metal`.
+/// Returns [`HypomnesisError::Nvml`] if no backend can satisfy the query
+/// and the `NVML` library loaded but could not start or count (see
+/// [`device_count`]).
 /// Returns [`HypomnesisError::NoGpuSource`] if no backend can satisfy
-/// the query.
+/// the query otherwise.
 #[allow(unused_variables)] // `index` unused when no GPU backend feature is enabled
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
 pub fn device_info(index: u32) -> Result<GpuDeviceInfo> {
@@ -210,7 +250,11 @@ pub fn device_info(index: u32) -> Result<GpuDeviceInfo> {
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
 /// is past the device count reported by `NVML`, `DXGI` or `Metal`.
-/// Returns [`HypomnesisError::NoGpuSource`] if every available backend fails.
+/// Returns [`HypomnesisError::Nvml`] if every available backend fails and
+/// the `NVML` library loaded but could not start or count (see
+/// [`device_count`]).
+/// Returns [`HypomnesisError::NoGpuSource`] if every available backend
+/// fails otherwise.
 #[allow(unused_variables)] // `device_index` unused when no GPU backend feature is enabled
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
 pub fn process_gpu_info(device_index: u32) -> Result<ProcessGpuInfo> {
@@ -388,8 +432,11 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
 /// is past the device count reported by `NVML`, `DXGI` or `Metal`.
+/// Returns [`HypomnesisError::Nvml`] if every available backend fails and
+/// the `NVML` library loaded but could not start or count (see
+/// [`device_count`]).
 /// Returns [`HypomnesisError::NoGpuSource`] if every available backend
-/// fails (or no backend is enabled by features).
+/// fails otherwise (or no backend is enabled by features).
 /// Returns [`HypomnesisError::ProcessListDenied`] on macOS when the
 /// process list was enumerated but not read, as that variant defines.
 pub fn gpu_processes(device_index: u32) -> Result<Vec<GpuProcessEntry>> {
@@ -424,8 +471,11 @@ pub fn gpu_processes(device_index: u32) -> Result<Vec<GpuProcessEntry>> {
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
 /// is past the device count reported by `NVML`, `DXGI` or `Metal`.
+/// Returns [`HypomnesisError::Nvml`] if every available backend fails and
+/// the `NVML` library loaded but could not start or count (see
+/// [`device_count`]).
 /// Returns [`HypomnesisError::NoGpuSource`] if every available backend
-/// fails (or no backend is enabled by features).
+/// fails otherwise (or no backend is enabled by features).
 /// Returns [`HypomnesisError::ProcessListDenied`] on macOS when the
 /// process list was enumerated but not read, as that variant defines.
 pub fn gpu_process_listing(device_index: u32) -> Result<GpuProcessListing> {
@@ -704,50 +754,31 @@ fn resolve_unresolved_windows_names(entries: &mut [GpuProcessEntry]) {
     }
 }
 
-/// Bounds-check `index` against whatever count source is available.
-///
-/// On macOS, tries `Metal` first (the same order as [`device_count`],
-/// so the bound reported matches the count `hmn` shows). Then tries
-/// `NVML`; on Windows, falls back to `DXGI` if `NVML` is unavailable.
-/// Returns `Ok(())` when no count source is available (caller will
-/// surface its own error, typically `NoGpuSource`).
+/// Bounds-check `index` against whatever count source is available, in
+/// [`device_count`]'s order ([`backend_count`]), so the bound reported
+/// matches the count `hmn` shows. Returns `Ok(())` when no count source is
+/// installed (caller will surface its own error, typically `NoGpuSource`).
 ///
 /// # Errors
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] when a count
 /// source reports a count and `index >= count`.
-#[allow(unused_variables)] // unused when no backend feature is enabled
-#[allow(clippy::missing_const_for_fn)] // const only when no features are enabled
-#[allow(clippy::unnecessary_wraps)] // Result is necessary only when metal, nvml or dxgi feature returns Err
+/// Returns [`HypomnesisError::Nvml`] when no count source reports a count
+/// and the `NVML` library loaded but could not start or count: the
+/// caller's own `NoGpuSource` would hide why.
 fn bounds_check(index: u32) -> Result<()> {
-    #[cfg(all(target_os = "macos", feature = "metal"))]
-    if let Some(count) = metal::device_count() {
-        return if index >= count {
-            Err(HypomnesisError::DeviceIndexOutOfRange { index, count })
-        } else {
-            Ok(())
-        };
-    }
+    bounds_verdict(index, backend_count())
+}
 
-    #[cfg(feature = "nvml")]
-    if let Some(count) = nvml::device_count() {
-        return if index >= count {
-            Err(HypomnesisError::DeviceIndexOutOfRange { index, count })
-        } else {
-            Ok(())
-        };
+/// The pure core of [`bounds_check`], over what [`backend_count`] found.
+fn bounds_verdict(index: u32, counted: std::result::Result<u32, Option<String>>) -> Result<()> {
+    match counted {
+        Ok(count) if index >= count => Err(HypomnesisError::DeviceIndexOutOfRange { index, count }),
+        // EXPLICIT: within the count, or no count source installed (the
+        // caller then reports NoGpuSource).
+        Ok(_) | Err(None) => Ok(()),
+        Err(Some(detail)) => Err(HypomnesisError::Nvml(detail)),
     }
-
-    #[cfg(all(windows, feature = "dxgi"))]
-    if let Some(count) = dxgi::device_count() {
-        return if index >= count {
-            Err(HypomnesisError::DeviceIndexOutOfRange { index, count })
-        } else {
-            Ok(())
-        };
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -823,6 +854,35 @@ mod tests {
             "{:?}",
             bounds_check(1)
         );
+    }
+
+    #[test]
+    fn no_count_error_is_nvml_only_when_nvml_loaded_and_failed() {
+        assert!(matches!(no_count_error(None), HypomnesisError::NoGpuSource));
+        let detail = "nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)";
+        assert!(
+            matches!(no_count_error(Some(detail.to_owned())), HypomnesisError::Nvml(ref s) if s == detail)
+        );
+    }
+
+    #[test]
+    fn bounds_verdict_checks_a_count_and_names_a_broken_nvml() {
+        assert!(bounds_verdict(0, Ok(1)).is_ok());
+        assert!(matches!(
+            bounds_verdict(1, Ok(1)),
+            Err(HypomnesisError::DeviceIndexOutOfRange { index: 1, count: 1 })
+        ));
+        assert!(matches!(
+            bounds_verdict(0, Ok(0)),
+            Err(HypomnesisError::DeviceIndexOutOfRange { index: 0, count: 0 })
+        ));
+        // No count source installed: the caller reports its own error.
+        assert!(bounds_verdict(0, Err(None)).is_ok());
+        // NVML loaded but broken: its detail, not the caller's NoGpuSource.
+        assert!(matches!(
+            bounds_verdict(0, Err(Some("boom".to_owned()))),
+            Err(HypomnesisError::Nvml(ref s)) if s == "boom"
+        ));
     }
 
     /// A GPU process row for the decision tests.

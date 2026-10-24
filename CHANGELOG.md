@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An NVIDIA driver that is installed but fails to start no longer reads as "no GPU"**
+  (`src/gpu/nvml.rs`, `src/gpu/mod.rs`, `src/snapshot.rs`, `src/error.rs`, `src/bin/hmn/ps.rs`,
+  `summary.rs`, `main.rs`) — `device_count()` now tells the two apart. An `NVML` library that does
+  not load (no NVIDIA driver here) is still `NoGpuSource`; one that loads but cannot start or
+  count (`nvmlInit_v2` or `nvmlDeviceGetCount_v2` missing or returning an error, for example
+  `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a driver upgrade without a reboot) is
+  `HypomnesisError::Nvml`, whose text names the call and the code:
+  `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`. Before, both were
+  `NoGpuSource`, and both read as zero GPUs. `hmn ps` printed `0 GPU processes found.` and
+  `--exit-status` exited `1` ("not on the GPU") while the GPUs ran jobs; it now prints
+  `hmn: ps failed to count devices: NVML error: …` and `hmn: ps: no device could be queried, so
+  nothing could be listed`, and exits `2` with nothing on stdout, `--json` included. `hmn` printed
+  `hmn: no visible GPUs.` and exited `0`; it now prints `hmn: NVML error: …` and exits `1`.
+  `Snapshot::all` returns the error instead of an empty `Vec` (a behaviour change for callers:
+  an empty `Vec` still means no count source installed, or one that counts zero). `device_info`,
+  `process_gpu_info`, `gpu_processes` and `gpu_process_listing` return it instead of
+  `NoGpuSource` when every backend failed, so `hmn ps --device N`, `hmn watch` and `hmn fits` name
+  the cause; `Snapshot::now`, which maps failures to `None`, is unchanged. A machine with no NVIDIA
+  driver behaves as before. `tests/cli_broken_nvml.rs` pins these outcomes on every Linux host, CI
+  included: it builds `tests/fixtures/nvml_broken.c`, a stand-in `libnvidia-ml.so.1` whose
+  `nvmlInit_v2` returns 18, loads it through `LD_LIBRARY_PATH` with no `nvidia-smi` on `PATH`, and
+  so touches no GPU. From the review of the v0.2.14 Linux field check
+  ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6.
+
 ## [0.2.14] - 2026-10-09
 
 Answers a field check of v0.2.13 on Apple Silicon

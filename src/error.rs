@@ -39,8 +39,16 @@ pub enum HypomnesisError {
     #[error("RAM query failed: {0}")]
     Ram(String),
 
-    /// `NVML` query failed (library load, symbol lookup, FFI call,
-    /// or driver-reported error code).
+    /// The `NVML` library loaded but could not start or count, and no
+    /// other backend answered (since v0.2.15): `nvmlInit_v2`,
+    /// `nvmlShutdown` or `nvmlDeviceGetCount_v2` is missing, or
+    /// `nvmlInit_v2` or `nvmlDeviceGetCount_v2` returned an error. The
+    /// text names the call and the return code, for example
+    /// `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`
+    /// after a driver upgrade without a reboot. Unlike
+    /// [`Self::NoGpuSource`], it does not mean "no GPU here": the GPUs may
+    /// be there, unreadable. An `NVML` library that does not load at all
+    /// is not this error but `NoGpuSource`.
     #[error("NVML error: {0}")]
     Nvml(String),
 
@@ -74,7 +82,11 @@ pub enum HypomnesisError {
     /// No GPU measurement source was usable.
     ///
     /// Returned when `NVML`, `DXGI`, `PDH`, and `nvidia-smi` all failed
-    /// (or were disabled by feature flags) for a single query. On macOS,
+    /// (or were disabled by feature flags) for a single query, unless the
+    /// `NVML` library loaded but could not start or count, which is
+    /// [`Self::Nvml`] instead (since v0.2.15). From [`crate::device_count`]
+    /// it means no count source is installed, which a caller may read as
+    /// zero GPUs. On macOS,
     /// `Metal` replaces `DXGI` and `PDH`, and the message names `Metal`,
     /// `NVML`, and `nvidia-smi`. On macOS, [`crate::gpu_processes`] and
     /// [`crate::gpu_process_listing`] also return it when the caller's

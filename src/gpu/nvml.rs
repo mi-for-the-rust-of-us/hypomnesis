@@ -57,9 +57,10 @@ const NVML_LIB_PATH: &str = "nvml.dll";
 
 /// Path to the `NVML` shared library on other platforms.
 ///
-/// `query` and `device_count` will fail to load this and return `None`,
-/// which the dispatchers handle as "no `NVML` source available". Defining
-/// the constant here avoids `#[cfg]` noise on every `Library::new` call.
+/// `query` and `device_count` will fail to load this and report `NVML` as
+/// absent, which the dispatchers handle as "no `NVML` source available".
+/// Defining the constant here avoids `#[cfg]` noise on every
+/// `Library::new` call.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 const NVML_LIB_PATH: &str = "libnvidia-ml.so.1";
 
@@ -76,6 +77,83 @@ const NVML_SUCCESS: u32 = 0;
 /// on this code — see its doc comment for the documented NVML contract
 /// this relies on.
 const NVML_ERROR_INSUFFICIENT_SIZE: u32 = 7;
+
+/// The `NVML_ERROR_*` name of an `NVML` return code, `None` for success or
+/// a code this table does not know. Transcribed from `nvmlReturn_t` in
+/// `nvml.h` (CUDA 13.1), so a newer driver's new code falls back to its
+/// number in [`call_failure`].
+#[must_use]
+const fn return_code_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        1 => "NVML_ERROR_UNINITIALIZED",
+        2 => "NVML_ERROR_INVALID_ARGUMENT",
+        3 => "NVML_ERROR_NOT_SUPPORTED",
+        4 => "NVML_ERROR_NO_PERMISSION",
+        5 => "NVML_ERROR_ALREADY_INITIALIZED",
+        6 => "NVML_ERROR_NOT_FOUND",
+        7 => "NVML_ERROR_INSUFFICIENT_SIZE",
+        8 => "NVML_ERROR_INSUFFICIENT_POWER",
+        9 => "NVML_ERROR_DRIVER_NOT_LOADED",
+        10 => "NVML_ERROR_TIMEOUT",
+        11 => "NVML_ERROR_IRQ_ISSUE",
+        12 => "NVML_ERROR_LIBRARY_NOT_FOUND",
+        13 => "NVML_ERROR_FUNCTION_NOT_FOUND",
+        14 => "NVML_ERROR_CORRUPTED_INFOROM",
+        15 => "NVML_ERROR_GPU_IS_LOST",
+        16 => "NVML_ERROR_RESET_REQUIRED",
+        17 => "NVML_ERROR_OPERATING_SYSTEM",
+        18 => "NVML_ERROR_LIB_RM_VERSION_MISMATCH",
+        19 => "NVML_ERROR_IN_USE",
+        20 => "NVML_ERROR_MEMORY",
+        21 => "NVML_ERROR_NO_DATA",
+        22 => "NVML_ERROR_VGPU_ECC_NOT_SUPPORTED",
+        23 => "NVML_ERROR_INSUFFICIENT_RESOURCES",
+        24 => "NVML_ERROR_FREQ_NOT_SUPPORTED",
+        25 => "NVML_ERROR_ARGUMENT_VERSION_MISMATCH",
+        26 => "NVML_ERROR_DEPRECATED",
+        27 => "NVML_ERROR_NOT_READY",
+        28 => "NVML_ERROR_GPU_NOT_FOUND",
+        29 => "NVML_ERROR_INVALID_STATE",
+        30 => "NVML_ERROR_RESET_TYPE_NOT_SUPPORTED",
+        999 => "NVML_ERROR_UNKNOWN",
+        _ => return None,
+    })
+}
+
+/// The detail of an `NVML` call that returned `code`:
+/// `<call> returned <NVML_ERROR_NAME> (<code>)`, or
+/// `<call> returned NVML_ERROR (<code>)` for a code [`return_code_name`]
+/// does not know.
+#[must_use]
+fn call_failure(call: &str, code: u32) -> String {
+    let name = return_code_name(code).unwrap_or("NVML_ERROR");
+    format!("{call} returned {name} ({code})")
+}
+
+/// Why [`NvmlSession::start`] gave no session.
+enum StartFailure {
+    /// The `NVML` library did not load: no NVIDIA driver is installed
+    /// here, so there is no GPU for `NVML` to report.
+    Absent,
+    /// The library loaded but could not start: `nvmlInit_v2` or
+    /// `nvmlShutdown` is missing, or `nvmlInit_v2` returned an error (a
+    /// driver/library version mismatch after a driver upgrade without a
+    /// reboot, a driver that is not loaded). The GPUs may be there,
+    /// unreadable. Holds the detail ([`call_failure`]).
+    Broken(String),
+}
+
+/// What [`device_count`] found: a count, no `NVML` library, or a library
+/// that loaded but could not start or count.
+pub(super) enum NvmlCount {
+    /// `nvmlDeviceGetCount_v2` answered.
+    Counted(u32),
+    /// The library did not load ([`StartFailure::Absent`]).
+    Absent,
+    /// The library loaded but could not start or count; holds the detail
+    /// that becomes [`crate::HypomnesisError::Nvml`]'s text.
+    Broken(String),
+}
 
 /// Maximum number of processes the fast path asks `NVML` to report per
 /// call, via a fixed stack buffer.
@@ -240,24 +318,33 @@ struct NvmlSession {
 
 impl NvmlSession {
     /// Load `NVML`, resolve `nvmlInit_v2` and `nvmlShutdown`, and
-    /// initialize. `None` if any step fails — with a `debug-output` trace
-    /// naming `caller` when it is the init call itself — and in every such
+    /// initialize. `None` if any step fails ([`Self::start`] says which).
+    fn open(caller: &str) -> Option<Self> {
+        Self::start(caller).ok()
+    }
+
+    /// [`Self::open`], telling apart the two ways to get no session: the
+    /// library did not load ([`StartFailure::Absent`]), or it loaded and
+    /// could not start ([`StartFailure::Broken`], with a `debug-output`
+    /// trace naming `caller` when it is the init call itself). In either
     /// case there is nothing to shut down.
     #[allow(unsafe_code)]
-    fn open(caller: &str) -> Option<Self> {
+    fn start(caller: &str) -> std::result::Result<Self, StartFailure> {
         // SAFETY: libloading::Library::new dynamically loads a shared library.
         // NVML is a stable NVIDIA driver component with a well-defined C ABI;
         // the library is reference-counted by the OS and unloaded when the
         // session (which owns `lib`) is dropped.
-        let lib = unsafe { libloading::Library::new(NVML_LIB_PATH) }.ok()?;
+        let lib =
+            unsafe { libloading::Library::new(NVML_LIB_PATH) }.map_err(|_| StartFailure::Absent)?;
         // SAFETY: symbol names match the documented NVML C API exactly, and
         // the type aliases match the NVML header definitions. The copied-out
         // function pointers are only called while `lib` is loaded: `init`
         // right here, `shutdown` from Drop (see the struct doc).
-        let init: NvmlInitFn = *unsafe { lib.get::<NvmlInitFn>(b"nvmlInit_v2\0") }.ok()?;
+        let init: NvmlInitFn = *unsafe { lib.get::<NvmlInitFn>(b"nvmlInit_v2\0") }
+            .map_err(|e| StartFailure::Broken(format!("failed to resolve nvmlInit_v2: {e}")))?;
         // SAFETY: as above — a documented NVML symbol; the alias matches the header.
-        let shutdown: NvmlShutdownFn =
-            *unsafe { lib.get::<NvmlShutdownFn>(b"nvmlShutdown\0") }.ok()?;
+        let shutdown: NvmlShutdownFn = *unsafe { lib.get::<NvmlShutdownFn>(b"nvmlShutdown\0") }
+            .map_err(|e| StartFailure::Broken(format!("failed to resolve nvmlShutdown: {e}")))?;
 
         // SAFETY: nvmlInit_v2 is reentrant + thread-safe; it initializes
         // internal NVML state. NVML_SUCCESS (0) is the success return code.
@@ -268,9 +355,9 @@ impl NvmlSession {
             // EXPLICIT: caller is read only by the debug-output trace above.
             #[cfg(not(feature = "debug-output"))]
             let _ = caller;
-            return None;
+            return Err(StartFailure::Broken(call_failure("nvmlInit_v2", ret)));
         }
-        Some(Self { shutdown, lib })
+        Ok(Self { shutdown, lib })
     }
 
     /// The loaded library, for resolving an entry point's own symbols.
@@ -894,18 +981,28 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
     Some(rows)
 }
 
-/// Number of NVIDIA GPUs visible to `NVML`.
-///
-/// Returns `None` if `NVML` can't be loaded or `nvmlDeviceGetCount_v2`
-/// fails. Used by the public `device_count()` dispatcher and (when
-/// available) for bounds-checking `idx` in `device_info`.
+/// Number of NVIDIA GPUs visible to `NVML`: [`NvmlCount::Counted`], or why
+/// there is none — [`NvmlCount::Absent`] when the library does not load
+/// (no NVIDIA driver here), [`NvmlCount::Broken`] when it loads but
+/// cannot start, or `nvmlDeviceGetCount_v2` is missing or fails. Used by
+/// the public `device_count()` dispatcher and for bounds-checking an
+/// index in the other dispatchers.
 #[allow(unsafe_code)]
-pub(super) fn device_count() -> Option<u32> {
-    let session = NvmlSession::open("device_count")?;
+pub(super) fn device_count() -> NvmlCount {
+    let session = match NvmlSession::start("device_count") {
+        Ok(session) => session,
+        Err(StartFailure::Absent) => return NvmlCount::Absent,
+        Err(StartFailure::Broken(detail)) => return NvmlCount::Broken(detail),
+    };
 
     // SAFETY: symbol name matches the documented NVML C API.
     let get_count: libloading::Symbol<'_, NvmlDeviceGetCountFn> =
-        unsafe { session.lib().get(b"nvmlDeviceGetCount_v2\0") }.ok()?;
+        match unsafe { session.lib().get(b"nvmlDeviceGetCount_v2\0") } {
+            Ok(symbol) => symbol,
+            Err(e) => {
+                return NvmlCount::Broken(format!("failed to resolve nvmlDeviceGetCount_v2: {e}"));
+            }
+        };
 
     let mut count: u32 = 0;
     // SAFETY: nvmlDeviceGetCount_v2 writes one u32 to the caller-provided pointer.
@@ -917,11 +1014,11 @@ pub(super) fn device_count() -> Option<u32> {
     if ret == NVML_SUCCESS {
         #[cfg(feature = "debug-output")]
         eprintln!("[NVML debug] device_count = {count}");
-        Some(count)
+        NvmlCount::Counted(count)
     } else {
         #[cfg(feature = "debug-output")]
         eprintln!("[NVML debug] nvmlDeviceGetCount_v2 returned {ret}");
-        None
+        NvmlCount::Broken(call_failure("nvmlDeviceGetCount_v2", ret))
     }
 }
 
@@ -988,5 +1085,50 @@ mod tests {
         let infos = [info(1, u64::MAX), info(2, DEVICE_TOTAL + 1)];
         let kept = filter_process_rows(&infos, DEVICE_TOTAL);
         assert!(kept.is_empty(), "{kept:?}");
+    }
+}
+
+// -----------------------------------------------------------------------
+// Tests (return-code naming — pure, every platform)
+// -----------------------------------------------------------------------
+
+#[cfg(test)]
+mod return_code_tests {
+    use super::*;
+
+    #[test]
+    fn return_code_name_knows_the_codes_init_and_count_return() {
+        // The codes `nvml.h` documents for nvmlInit_v2 and
+        // nvmlDeviceGetCount_v2, plus the version mismatch a driver
+        // upgrade without a reboot produces.
+        for (code, name) in [
+            (1, "NVML_ERROR_UNINITIALIZED"),
+            (2, "NVML_ERROR_INVALID_ARGUMENT"),
+            (4, "NVML_ERROR_NO_PERMISSION"),
+            (9, "NVML_ERROR_DRIVER_NOT_LOADED"),
+            (18, "NVML_ERROR_LIB_RM_VERSION_MISMATCH"),
+            (999, "NVML_ERROR_UNKNOWN"),
+        ] {
+            assert_eq!(return_code_name(code), Some(name), "code {code}");
+        }
+    }
+
+    #[test]
+    fn return_code_name_is_none_for_success_and_unknown_codes() {
+        assert_eq!(return_code_name(NVML_SUCCESS), None);
+        assert_eq!(return_code_name(31), None);
+        assert_eq!(return_code_name(998), None);
+    }
+
+    #[test]
+    fn call_failure_names_the_call_and_the_code() {
+        assert_eq!(
+            call_failure("nvmlInit_v2", 18),
+            "nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)"
+        );
+        assert_eq!(
+            call_failure("nvmlDeviceGetCount_v2", 42),
+            "nvmlDeviceGetCount_v2 returned NVML_ERROR (42)"
+        );
     }
 }

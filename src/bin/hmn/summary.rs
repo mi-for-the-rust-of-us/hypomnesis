@@ -29,6 +29,12 @@ fn format_none_readable_message(count: usize) -> String {
 
 /// Run the default subcommand: print one line per visible GPU (or, with
 /// `--json`, a JSON array).
+///
+/// An NVIDIA driver that is installed but fails to start is
+/// `Snapshot::all`'s `HypomnesisError::Nvml` (since v0.2.15), returned
+/// here before anything is printed, so `main` reports it and exits `1`
+/// rather than this printing `no visible GPUs.`, which is kept for a
+/// machine with no count source installed or one that counts zero.
 pub fn run_summary(json: bool) -> Result<()> {
     let snaps = Snapshot::all()?;
     if json {

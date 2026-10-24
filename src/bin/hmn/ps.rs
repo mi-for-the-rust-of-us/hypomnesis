@@ -11,7 +11,8 @@ use std::process::ExitCode;
 use clap::ValueEnum;
 use hypomnesis::spill::DEFAULT_SHARED_GROWTH_BYTES;
 use hypomnesis::{
-    GpuProcessEntry, device_count, device_info, gpu_process_listing, snapshot_is_spilling,
+    GpuProcessEntry, HypomnesisError, device_count, device_info, gpu_process_listing,
+    snapshot_is_spilling,
 };
 
 use crate::format::{
@@ -362,9 +363,11 @@ pub fn matches_any(name: &str, patterns: &[String]) -> bool {
 }
 
 /// Whether `hmn ps` failed outright: at least one device was tried and
-/// none of them answered. `tried == 0` (no device to try, because
-/// `device_count()` failed) is not a failure, and one failed device
-/// among several that answered is a skip, not a failure.
+/// none of them answered. `tried == 0` (no device to try: no count source
+/// installed, or one that counts zero) is not a failure, and one failed
+/// device among several that answered is a skip, not a failure. A count
+/// source that is installed but broken never gets this far: `run_ps`
+/// exits `2` before trying any device.
 #[must_use]
 const fn every_device_failed(tried: usize, failed: usize) -> bool {
     tried > 0 && failed >= tried
@@ -388,8 +391,16 @@ pub fn device_query_failure_line(
     }
 }
 
-/// The closing stderr line when every device `hmn ps` tried failed, so
-/// its exit `2` always has a stated reason.
+/// The stderr line when the devices could not be counted:
+/// `hmn: ps failed to count devices: <err>`. `ALL_DEVICES_FAILED_LINE`
+/// follows it, as it follows the last skipped device.
+#[must_use]
+fn device_count_failure_line(err: &impl std::fmt::Display) -> String {
+    format!("hmn: ps failed to count devices: {err}")
+}
+
+/// The closing stderr line when every device `hmn ps` tried failed, or
+/// none could be counted, so its exit `2` always has a stated reason.
 const ALL_DEVICES_FAILED_LINE: &str =
     "hmn: ps: no device could be queried, so nothing could be listed";
 
@@ -445,18 +456,33 @@ const fn ps_exit_code(
 /// that skipped a failed device or left a process the filters could match
 /// unreadable exits `2`, not `1` (`ps_exit_code`): `1` means "queried,
 /// nothing matched", and the job may sit on the skipped device or be the
-/// process that was refused. With no device to try at all
-/// (`device_count()` failed), nothing was skipped, and the listing exits
-/// as before.
+/// process that was refused.
+///
+/// Without `--device`, the devices to try come from `device_count()`, whose
+/// two errors mean different things. `NoGpuSource` (no count source
+/// installed, as on a machine without an NVIDIA driver) leaves no device to
+/// try: nothing was skipped, and the empty listing exits `0`, or `1` under
+/// `exit_status`, as a machine without GPUs should. Any other error (an
+/// `NVML` library that loaded but could not start or count) prints
+/// `device_count_failure_line` and `ALL_DEVICES_FAILED_LINE` and exits `2`
+/// with nothing on stdout, as when every device failed: the GPUs may be
+/// there, and an empty listing would read as "idle" (since v0.2.15).
 pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool) -> ExitCode {
-    // device_count returning Err here means no enumeration backend is
-    // enabled / every backend failed; treat as zero NVIDIA devices and
-    // let the empty Vec fall through to the formatter (which prints
-    // a header-only table or `[]`).
-    let device_indices: Vec<u32> = filters.device.map_or_else(
-        || (0..device_count().unwrap_or(0)).collect(),
-        |idx| vec![idx],
-    );
+    let device_indices: Vec<u32> = match filters.device {
+        Some(idx) => vec![idx],
+        None => match device_count() {
+            Ok(count) => (0..count).collect(),
+            // No count source installed: no device to try, and the empty
+            // Vec falls through to the formatter (a header-only table or
+            // `[]`).
+            Err(HypomnesisError::NoGpuSource) => Vec::new(),
+            Err(e) => {
+                eprintln!("{}", device_count_failure_line(&e));
+                eprintln!("{ALL_DEVICES_FAILED_LINE}");
+                return ExitCode::from(2);
+            }
+        },
+    };
 
     let mut rows: Vec<PsRow> = Vec::new();
     // Processes `--filter` could not judge (no resolvable name), and the
@@ -995,6 +1021,14 @@ mod tests {
         assert_eq!(
             device_query_failure_line(3, &"boom", false),
             "hmn: ps failed to query device 3: boom"
+        );
+    }
+
+    #[test]
+    fn device_count_failure_line_names_the_count_and_the_reason() {
+        assert_eq!(
+            device_count_failure_line(&"NVML error: boom"),
+            "hmn: ps failed to count devices: NVML error: boom"
         );
     }
 

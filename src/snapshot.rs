@@ -323,7 +323,11 @@ impl Snapshot {
     /// delta across the GPU walk is microseconds and per-snapshot
     /// re-measurement would add no useful precision.
     ///
-    /// Returns an empty `Vec` when no GPUs are visible. Callers needing
+    /// Returns an empty `Vec` when no GPUs are visible: no count source is
+    /// installed ([`crate::device_count`]'s `NoGpuSource`), or the one
+    /// installed counts zero. A count source that is installed but broken
+    /// is an error, not an empty `Vec` (since v0.2.15), so a broken driver
+    /// does not read as a machine without GPUs. Callers needing
     /// RAM-only state should use [`crate::process_rss`] or
     /// [`Self::now`] (which returns a single `Snapshot` with `gpu` and
     /// `gpu_device` set to `None`).
@@ -346,14 +350,22 @@ impl Snapshot {
     /// query fails — including the Linux path, where `/proc/self/status`
     /// read errors and `VmRSS` parse failures are wrapped into the
     /// `Ram` variant rather than surfaced as `Io`.
+    /// Returns [`crate::HypomnesisError::Nvml`] when no backend reports a
+    /// GPU count and the `NVML` library loaded but could not start or
+    /// count (see [`crate::device_count`]).
     pub fn all() -> Result<Vec<Self>> {
         let ram_bytes = crate::ram::process_rss()?;
 
-        // device_count() returning Err here means "no enumeration backend
-        // is enabled / every backend failed to report a count" — treat
-        // that as zero NVIDIA GPUs and let the Windows DXGI extras path
-        // (if compiled in) still surface iGPUs. RAM is already captured.
-        let nvidia_count = crate::gpu::device_count().unwrap_or(0);
+        // `NoGpuSource` means no count source is installed: zero NVIDIA
+        // GPUs, and the Windows DXGI extras path (if compiled in) can
+        // still surface iGPUs. Any other error is an installed source
+        // that is broken (`HypomnesisError::Nvml`): the GPUs may be there,
+        // and an empty Vec would say there are none.
+        let nvidia_count = match crate::gpu::device_count() {
+            Ok(count) => count,
+            Err(crate::HypomnesisError::NoGpuSource) => 0,
+            Err(e) => return Err(e),
+        };
         // CAST: u32 → usize, NVML / DXGI device counts are bounded by
         // hardware (handfuls in practice); fits trivially in usize.
         #[allow(clippy::as_conversions)]

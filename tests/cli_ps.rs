@@ -63,6 +63,18 @@ const DENIAL_TEXT: &str = "process list unreadable (";
 /// every platform before its list of backends.
 const NO_GPU_SOURCE_TEXT: &str = "no GPU measurement source available";
 
+/// Whether `stderr` holds the line `hmn ps` prints when the devices could
+/// not be counted (an NVIDIA driver installed but failing to start), and
+/// the closing all-failed line after it.
+fn count_failure_lines(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|l| l.starts_with("hmn: ps failed to count devices: "))
+        && stderr
+            .lines()
+            .any(|l| l == "hmn: ps: no device could be queried, so nothing could be listed")
+}
+
 /// The remedy a denied device's line ends with, apart from ` (skipped)`.
 #[cfg(target_os = "macos")]
 const REMEDY_TEXT: &str = "re-run outside the sandbox";
@@ -73,7 +85,9 @@ const REMEDY_TEXT: &str = "re-run outside the sandbox";
 /// exit `2` never passes. The skip line must say why: the process list was
 /// unreadable (a sandbox that denies `process-info*`), or no GPU source
 /// is available (a host whose source fails for another reason, such as a
-/// macOS VM) under its own label. Writes `cli_ps: <label> branch=<branch>`
+/// macOS VM) under its own label. A host whose NVIDIA driver is installed
+/// but fails to start exits `2` before trying a device, with the
+/// count-failure line instead. Writes `cli_ps: <label> branch=<branch>`
 /// straight to stderr, so the branch taken is in CI's log even for a passing
 /// test (`eprintln!` is captured by `libtest` and hidden), and asserts the
 /// branch is not `rejected`.
@@ -84,6 +98,8 @@ fn accept(label: &str, code: Option<i32>, stderr: &str, expected: i32) {
         "skipped-device"
     } else if code == Some(2) && skipped_device_line(stderr, NO_GPU_SOURCE_TEXT) {
         "skipped-device-nogpu"
+    } else if code == Some(2) && count_failure_lines(stderr) {
+        "count-failed"
     } else {
         "rejected"
     };
@@ -96,8 +112,9 @@ fn accept(label: &str, code: Option<i32>, stderr: &str, expected: i32) {
 
 /// `--exit-status` makes "nothing listed" exit `1`, as `pgrep` does;
 /// without it the same listing exits `0`. No process has PID `u32::MAX`.
-/// On a host with no device to try (`device_count()` fails: the ubuntu and
-/// windows runners) that still holds. On a host whose GPU source fails both
+/// On a host with no device to try (no count source installed, so
+/// `device_count()` fails with `NoGpuSource`: the ubuntu and windows
+/// runners) that still holds. On a host whose GPU source fails both
 /// listings exit `2` with a skipped-device line instead, since nothing
 /// could be listed; `accept` takes that branch only with the line.
 #[test]
