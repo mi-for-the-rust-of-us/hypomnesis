@@ -9,7 +9,9 @@
 //!   Uses [`hypomnesis::Snapshot::all`], so on Windows the AMD / Intel
 //!   `iGPU` surfaces alongside the NVIDIA dGPU(s); on macOS the Apple
 //!   Silicon `SoC` surfaces as a single `UMA` device. `--json` emits the
-//!   same data as a JSON array instead of text.
+//!   same data as a JSON array instead of text. A device that cannot be
+//!   read is named on stderr and skipped; when none can be read, or the
+//!   devices cannot be counted, it exits `2` with nothing on stdout.
 //! - `hmn ps` — list processes holding GPU memory across one or all
 //!   visible devices. On Linux (`NVML`) the list is compute-only; on
 //!   Windows (`PDH`, `WDDM 2.0`+) the list includes every GPU memory
@@ -78,7 +80,11 @@ mod watch;
                   \n\
                   Default subcommand: prints one line per visible GPU with free / total VRAM. \
                   `--json` emits the same data as a JSON array instead (fields: index, name, \
-                  total_bytes, free_bytes, used_bytes, reserved_bytes, driver_version).\n\
+                  total_bytes, free_bytes, used_bytes, reserved_bytes, driver_version). A device \
+                  that cannot be read is skipped with a stderr line ending `(skipped)`; when none \
+                  can be read, or the devices cannot be counted (an NVIDIA driver that is \
+                  installed but fails to start), it exits 2 with nothing on stdout, `--json` \
+                  included.\n\
                   \n\
                   `hmn ps`: lists processes holding GPU memory.\n\
                   \n\
@@ -189,7 +195,9 @@ struct Cli {
     /// rather than being silently ignored. One object per visible GPU:
     /// `index` (number), `name` (string or null),
     /// `total_bytes`/`free_bytes`/`used_bytes` (numbers), `reserved_bytes`
-    /// (number or null), `driver_version` (string or null).
+    /// (number or null), `driver_version` (string or null). A device that
+    /// cannot be read has no object; when none can be read, nothing is
+    /// printed (not `[]`) and the exit is `2`.
     #[arg(long)]
     json: bool,
 }
@@ -492,10 +500,13 @@ fn main() -> std::process::ExitCode {
         );
         return std::process::ExitCode::from(2);
     }
-    let outcome = match cli.command {
+    // Every subcommand returns its own exit code (since v0.2.15, the default
+    // view too): `hmn` and `hmn ps` exit `2` when they could not tell (a
+    // device that cannot be listed, none readable, the devices uncounted),
+    // `spill` passes the wrapped command's through, `watch` says whether
+    // spill was observed, and `fits` whether the size fits.
+    match cli.command {
         None => run_summary(cli.json),
-        // `ps` also bypasses the Ok/Err fold: an unlistable `--device` is
-        // exit `2`, like `fits`, not the fold's generic `1`.
         Some(Commands::Ps {
             pids,
             device,
@@ -504,25 +515,18 @@ fn main() -> std::process::ExitCode {
             sort,
             json,
             exit_status,
-        }) => {
-            return run_ps(
-                &PsFilters::new(&pids, device, min, filters),
-                sort,
-                json,
-                exit_status,
-            );
-        }
-        // `spill` bypasses the Ok/Err fold below: its exit code is the
-        // wrapped command's, passed through — not hmn's own
-        // success/failure.
+        }) => run_ps(
+            &PsFilters::new(&pids, device, min, filters),
+            sort,
+            json,
+            exit_status,
+        ),
         Some(Commands::Spill {
             interval,
             device,
             json,
             command,
-        }) => return run_spill(interval, device, json, &command),
-        // `watch` also bypasses the Ok/Err fold: its exit code conveys
-        // whether spill was observed, not hmn's own success/failure.
+        }) => run_spill(interval, device, json, &command),
         Some(Commands::Watch {
             pids,
             interval,
@@ -536,24 +540,15 @@ fn main() -> std::process::ExitCode {
         }) => {
             // Validated before any backend call: an invalid argument
             // combination fails fast without touching hardware at all.
-            return match Selection::new(&pids, top, follow_new, &filters, min) {
+            match Selection::new(&pids, top, follow_new, &filters, min) {
                 Ok(selection) => run_watch(&selection, interval, duration, device, json),
                 Err(msg) => {
                     eprintln!("hmn: {msg}");
                     std::process::ExitCode::from(2)
                 }
-            };
+            }
         }
-        // `fits` also bypasses the Ok/Err fold: its exit code conveys
-        // whether the size fits, not hmn's own success/failure.
-        Some(Commands::Fits { size, device }) => return run_fits(size, device),
-    };
-    match outcome {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("hmn: {e}");
-            std::process::ExitCode::FAILURE
-        }
+        Some(Commands::Fits { size, device }) => run_fits(size, device),
     }
 }
 

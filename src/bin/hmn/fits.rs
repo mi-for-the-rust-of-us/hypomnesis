@@ -15,9 +15,9 @@ use crate::format::{device_name_suffix, format_vram, format_vram_precise};
 /// documented per-process *lower bound* on usage (see
 /// [`hypomnesis::device_info`]'s "Imprecision note"), so it can
 /// over-state true free `VRAM` there; on macOS it is `MTLDevice`'s static working-set
-/// budget, not a live gauge. Bypasses `main`'s `Ok`/`Err` fold — the
-/// exit code conveys the answer, not `hmn`'s own success/failure — the
-/// same pattern `run_spill`/`run_watch` use.
+/// budget, not a live gauge. Returns its own exit code, as every
+/// subcommand does: the code conveys the answer, not `hmn`'s own
+/// success/failure.
 pub fn run_fits(size: u64, device: u32) -> std::process::ExitCode {
     let info = match device_info(device) {
         Ok(info) => info,

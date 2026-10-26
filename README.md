@@ -239,6 +239,14 @@ GPU 1 [Intel Iris Xe Graphics]: free 32768 MiB / 32768 MiB
 
 (The Intel iGPU line has no reserved parenthetical or driver suffix — `DXGI` does not expose the NVML carve-out or an NVIDIA driver string, so `reserved_bytes` and `driver_version` are both `None` there.)
 
+A GPU that fails to answer is not dropped silently (since v0.2.15): `hmn` names it on stderr, as `hmn ps` does, and lists the others with exit `0`:
+
+```
+hmn: failed to query device 1: no GPU measurement source available (NVML and nvidia-smi both failed or are disabled) (skipped)
+```
+
+When no GPU can be read (`hmn: 2 GPU(s) enumerated but none readable.`), or the GPUs cannot be counted (`hmn: failed to count devices: NVML error: nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`, an NVIDIA driver upgraded without a reboot), `hmn` exits `2` with nothing on stdout, `--json` included, so a script never reads a broken driver as a machine without GPUs. `hmn: no visible GPUs.` (exit `0`) means there is no NVIDIA driver, or one that counts no GPU.
+
 `hmn ps` (illustrative — empty on machines with no active CUDA workload):
 
 ```

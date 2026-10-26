@@ -254,15 +254,15 @@ fn ps_exits_2_naming_the_count_call_when_it_fails() {
 /// stdout, `--json` included, where v0.2.14 printed `hmn: no visible
 /// GPUs.` and exited `0`.
 #[test]
-fn summary_exits_1_with_the_reason_when_nvml_cannot_start() {
+fn summary_exits_2_with_the_reason_when_nvml_cannot_start() {
     let Some(fake) = FakeNvml::build("summary-init") else {
         return;
     };
-    let error_line = format!("hmn: {NVML_INIT_ERROR}");
+    let error_line = format!("hmn: failed to count devices: {NVML_INIT_ERROR}");
     let cases: [&[&str]; 2] = [&[], &["--json"]];
     for args in cases {
         let run = fake.hmn(args, &[("FAKE_NVML_INIT", "18")]);
-        assert_eq!(run.code, Some(1), "hmn {args:?}: stderr: {}", run.stderr);
+        assert_eq!(run.code, Some(2), "hmn {args:?}: stderr: {}", run.stderr);
         assert_eq!(run.stdout, "", "hmn {args:?}: stdout");
         assert!(
             has_line(&run.stderr, &error_line),
@@ -270,6 +270,105 @@ fn summary_exits_1_with_the_reason_when_nvml_cannot_start() {
             run.stderr
         );
     }
+}
+
+/// The skip line `hmn` prints for a lost device, with Linux's backends.
+const LOST_DEVICE_1_SKIP: &str = "hmn: failed to query device 1: no GPU measurement source \
+     available (NVML and nvidia-smi both failed or are disabled) (skipped)";
+
+/// The line the fake's one working H100 gives in `hmn`'s summary.
+const H100_LINE: &str =
+    "GPU 0 [NVIDIA H100 NVL]: free 15872 MiB / 16384 MiB (512 MiB reserved), driver 999.99";
+
+/// A device that fails to answer is named on stderr and the others are
+/// listed, exit `0`, where v0.2.14 dropped it without a word (issue #4,
+/// note 5).
+#[test]
+fn summary_skips_a_device_it_cannot_read() {
+    let Some(fake) = FakeNvml::build("summary-lost") else {
+        return;
+    };
+    let env = [("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,lost")];
+    let run = fake.hmn(&[], &env);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, format!("{H100_LINE}\n"));
+    assert!(
+        has_line(&run.stderr, LOST_DEVICE_1_SKIP),
+        "stderr: {}",
+        run.stderr
+    );
+
+    let run = fake.hmn(&["--json"], &env);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.starts_with("[{\"index\":0,") && !run.stdout.contains("\"index\":1"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        has_line(&run.stderr, LOST_DEVICE_1_SKIP),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+/// With no device readable, `hmn` names each, says none was readable and
+/// exits `2` with nothing on stdout, `--json` included, where v0.2.14
+/// printed the line on stdout (or `[]`) and exited `0`.
+#[test]
+fn summary_exits_2_when_no_device_is_readable() {
+    let Some(fake) = FakeNvml::build("summary-none-readable") else {
+        return;
+    };
+    let cases: [&[&str]; 2] = [&[], &["--json"]];
+    for args in cases {
+        let run = fake.hmn(args, &[("FAKE_NVML_DEVICES", "lost,lost")]);
+        assert_eq!(run.code, Some(2), "hmn {args:?}: stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "", "hmn {args:?}: stdout");
+        for line in [
+            LOST_DEVICE_1_SKIP.replace("device 1", "device 0").as_str(),
+            LOST_DEVICE_1_SKIP,
+            "hmn: 2 GPU(s) enumerated but none readable.",
+        ] {
+            assert!(
+                has_line(&run.stderr, line),
+                "hmn {args:?}: no {line:?} in stderr: {}",
+                run.stderr
+            );
+        }
+    }
+}
+
+/// A device whose memory answers but whose process list fails: `hmn`
+/// lists it (it reads only memory), while `hmn ps` skips it and, with no
+/// other device, exits `2` — the asymmetry the issue #4 review described.
+#[test]
+fn a_device_whose_process_list_fails_is_listed_by_hmn_and_skipped_by_ps() {
+    let Some(fake) = FakeNvml::build("noprocs") else {
+        return;
+    };
+    let env = [("FAKE_NVML_DEVICES", "noprocs:NVIDIA H100 NVL")];
+    let run = fake.hmn(&[], &env);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, format!("{H100_LINE}\n"));
+
+    let run = fake.hmn(&["ps"], &env);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "");
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: ps failed to query device 0: no GPU measurement source available (NVML and \
+             nvidia-smi both failed or are disabled) (skipped)"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        has_line(&run.stderr, ALL_DEVICES_FAILED_LINE),
+        "stderr: {}",
+        run.stderr
+    );
 }
 
 /// The commands that query one device exit `2` naming the reason, where
@@ -432,8 +531,5 @@ fn summary_lists_a_working_fake_gpu() {
     };
     let run = fake.hmn(&[], &[("FAKE_NVML_DEVICES", "NVIDIA H100 NVL")]);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(
-        run.stdout,
-        "GPU 0 [NVIDIA H100 NVL]: free 15872 MiB / 16384 MiB (512 MiB reserved), driver 999.99\n"
-    );
+    assert_eq!(run.stdout, format!("{H100_LINE}\n"));
 }

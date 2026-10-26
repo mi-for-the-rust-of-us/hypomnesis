@@ -47,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--exit-status` exited `1` ("not on the GPU") while the GPUs ran jobs; it now prints
   `hmn: ps failed to count devices: NVML error: …` and `hmn: ps: no device could be queried, so
   nothing could be listed`, and exits `2` with nothing on stdout, `--json` included. `hmn` printed
-  `hmn: no visible GPUs.` and exited `0`; it now prints `hmn: NVML error: …` and exits `1`.
+  `hmn: no visible GPUs.` and exited `0`; it now prints `hmn: failed to count devices: NVML error:
+  …` and exits `2` with nothing on stdout, `--json` included.
   `Snapshot::all` returns the error instead of an empty `Vec` (a behaviour change for callers:
   an empty `Vec` still means no count source installed, or one that counts zero). `device_info`,
   `process_gpu_info`, `gpu_processes` and `gpu_process_listing` return it instead of
@@ -60,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LD_LIBRARY_PATH` with no `nvidia-smi` on `PATH`, and so touches no GPU; on CI a missing C
   compiler fails the tests instead of skipping them. From the review of the v0.2.14 Linux field check
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6.
+
+- **`hmn` states each device it skips, and exits `2` when it can read none** (`src/bin/hmn/summary.rs`,
+  `main.rs`, `src/snapshot.rs`) — a GPU whose `device_info` failed was dropped from `hmn`'s list
+  without a word, with exit `0`, so "every GPU listed" could pass on a node missing one. It now gets
+  `hmn ps`'s skipped-device line, without the `ps`: `hmn: failed to query device 1: … (skipped)`,
+  and the others are listed, exit `0`. With no device readable, `hmn: N GPU(s) enumerated but none
+  readable.` moves from stdout to stderr and `hmn` exits `2` with nothing on stdout, where it exited
+  `0`, and `--json` prints nothing, where it printed `[]`. `Snapshot::all` keeps no error for such a
+  device, so `hmn` asks `device_info` again for it, which costs one call only where a device
+  already failed; the `Snapshot::all` docs now state the order this relies on (the counted devices
+  first, in index order). Every subcommand now returns its own exit code, so `main`'s `Ok`/`Err`
+  fold, whose generic `1` only `hmn` still used, is gone. Issue #4, note 5; item 8.
 
 ### Documentation
 

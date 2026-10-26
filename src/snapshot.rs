@@ -318,6 +318,13 @@ impl Snapshot {
     /// Basic Render Driver (`VendorId = 0x1414`) is always skipped — it
     /// has no real GPU memory to report.
     ///
+    /// The order is part of the contract (stated since v0.2.15): the devices
+    /// [`crate::device_count`] counts come first, in index order, so the
+    /// snapshot at position `i` below that count is device `i`, with
+    /// `gpu_device` `None` when its [`crate::device_info`] failed; on
+    /// Windows the other `DXGI` adapters follow, indexed on from that count,
+    /// always with `gpu_device` set.
+    ///
     /// Each returned [`Snapshot`] carries the same `ram_bytes`: a single
     /// `RSS` measurement is taken once and reused, since the wall-time
     /// delta across the GPU walk is microseconds and per-snapshot

@@ -437,10 +437,9 @@ const fn ps_exit_code(
 /// along the way (see [`snapshot_is_spilling`]) — apply `filters`, sort
 /// per `--sort`, then emit either a text table or JSON.
 ///
-/// Returns the exit code, bypassing `main`'s `Ok`/`Err` fold like
-/// `run_fits` and `run_watch`: `0` normally; `1` under `exit_status`
-/// (`--exit-status`) when no process is listed and every device tried
-/// answered, so `hmn ps --filter canvas --exit-status` is a one-line "is
+/// Returns the exit code, as every subcommand does: `0` normally; `1`
+/// under `exit_status` (`--exit-status`) when no process is listed and
+/// every device tried answered, so `hmn ps --filter canvas --exit-status` is a one-line "is
 /// my job on the GPU?" gate, as `pgrep` is for processes; `2` when a
 /// device named by `--device` cannot be listed — out of range (`device
 /// index 3 out of range (have 1 devices)`, the library's own bounds
