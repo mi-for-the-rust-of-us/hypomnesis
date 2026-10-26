@@ -7,9 +7,9 @@
 //! the first success. Backend modules are crate-private — public access
 //! is via the five dispatchers ([`device_count`], [`device_info`],
 //! [`process_gpu_info`], [`gpu_processes`], [`gpu_process_listing`]), plus
-//! [`process_exists`] (since v0.2.13), which reuses the Windows and macOS
-//! backends' process lookups to answer whether a PID names a running process
-//! at all.
+//! [`process_exists`] (since v0.2.13) and [`process_name`] (since v0.2.15),
+//! which reuse the backends' process lookups to answer whether a PID names a
+//! running process at all, and what it is called.
 
 use crate::{
     GpuDeviceInfo, GpuProcessEntry, GpuProcessListing, HypomnesisError, ProcessGpuInfo, Result,
@@ -38,9 +38,10 @@ pub(crate) mod pdh;
 #[cfg(feature = "nvidia-smi-fallback")]
 mod nvidia_smi;
 
-// Linux names for `NVML`'s process rows; see its module docs for why
-// `comm` alone is not enough.
-#[cfg(all(target_os = "linux", feature = "nvml"))]
+// Linux names for `NVML`'s process rows and for `process_name`; see its
+// module docs for why `comm` alone is not enough. Pure `std`, so compiled
+// on Linux whatever the features, since `process_name` always is.
+#[cfg(target_os = "linux")]
 mod proc_name;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -678,6 +679,62 @@ pub fn process_exists(pid: u32) -> Option<bool> {
     }
 }
 
+/// The name of process `pid`, spelled as the process listings spell it,
+/// or `None` when it cannot be had. Never errors.
+///
+/// | Platform | Source (the listing's own) | `None` when |
+/// |---|---|---|
+/// | Linux | `/proc/<pid>/comm`, extended past the kernel's 15-byte cut from the `exe` link or `argv[0]`, once [`process_exists`] has not ruled `pid` out (so a thread ID is not named as a process) | the process is gone or hidden (`hidepid`), `pid` is a thread, or `comm` is unreadable |
+/// | Windows (`pdh` feature) | `OpenProcess` + `QueryFullProcessImageNameW`, then a `Toolhelp32` snapshot; PID 4 is `[kernel]` | the process is gone, or neither source names it |
+/// | macOS (`metal` feature) | `proc_pidpath`'s basename, else `p_comm` (cut at 16 bytes) where a sandbox refuses the path | the process is gone, both are refused, or `pid` exceeds `i32::MAX` |
+/// | anything else | — | always |
+///
+/// Unlike [`gpu_processes`], it never returns the Windows `[exited]` or
+/// `[protected]` brackets: a process it cannot name is `None`. The listing
+/// a `nvidia-smi` fallback produces takes `nvidia-smi`'s own spelling,
+/// which may differ. The answer is a snapshot: the PID can exit, or be
+/// reused, the moment after.
+///
+/// Added in v0.2.15 for `hmn watch`, which names a watched PID that is
+/// missing from the watched device's listing (on another GPU, or holding
+/// no GPU memory) rather than printing `?`, which means "unresolved".
+#[must_use]
+#[allow(unused_variables)] // `pid` unused where no process-lookup source is compiled in
+#[allow(clippy::missing_const_for_fn)] // const only on platforms whose arm is `None`
+pub fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        // `/proc/<tid>/comm` exists for a thread too, and names the
+        // thread; `process_exists` checks the `Tgid`.
+        if process_exists(pid) == Some(false) {
+            None
+        } else {
+            proc_name::read_proc_name(pid)
+        }
+    }
+    #[cfg(all(windows, feature = "pdh"))]
+    {
+        pdh::name_from_pid_windows(pid).or_else(|| {
+            pdh::resolve_names_via_snapshot(&[pid])?
+                .into_iter()
+                .find_map(|(found, name)| (found == pid).then_some(name))
+        })
+    }
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        metal::process_name(pid)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        all(windows, feature = "pdh"),
+        all(target_os = "macos", feature = "metal")
+    )))]
+    {
+        // No process-lookup source on this platform / feature set.
+        None
+    }
+}
+
 /// The `Tgid` (thread-group ID, the process's PID) field of a Linux
 /// `/proc/<pid>/status` text; `None` when absent or malformed. For a
 /// thread's `/proc/<tid>/status` it names the owning process, which
@@ -818,6 +875,55 @@ mod tests {
         assert_eq!(process_exists(impossible), Some(false));
         #[cfg(all(target_os = "macos", feature = "metal"))]
         assert_eq!(process_exists(impossible), None);
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        all(windows, feature = "pdh"),
+        all(target_os = "macos", feature = "metal")
+    ))]
+    #[test]
+    #[allow(clippy::unwrap_used)] // test-only: the test binary has a file name
+    fn process_name_names_this_process_as_the_listings_would() {
+        // Cargo names a test binary `<crate>-<16 hex digits>`, past Linux's
+        // 15-byte `comm` cut, so on Linux this also checks the extension.
+        let exe = std::env::current_exe().unwrap();
+        let expected = exe.file_name().unwrap().to_str().unwrap();
+        assert_eq!(process_name(std::process::id()).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn process_name_of_an_impossible_pid_is_none() {
+        // Above every platform's PID ceiling, as in
+        // `process_exists_does_not_find_an_impossible_pid`.
+        assert_eq!(process_name(u32::MAX - 2), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::unwrap_used)] // test-only
+    fn process_name_does_not_name_a_thread_as_a_process() {
+        // A thread has its own readable `/proc/<tid>/comm`; `process_name`
+        // must not take its ID for a process's. A parked thread reads its
+        // own ID from `/proc/thread-self` (`<pid>/task/<tid>`) and sends it.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel::<Option<u32>>();
+        let handle = std::thread::spawn(move || {
+            let tid = std::fs::read_link("/proc/thread-self")
+                .ok()
+                .and_then(|link| link.file_name()?.to_str()?.parse().ok());
+            let _ = tid_tx.send(tid);
+            let _ = rx.recv();
+        });
+        let tid = tid_rx.recv().unwrap().unwrap();
+        // Without the guard the name would be read: the comm is there.
+        let comm_readable = std::fs::read_to_string(format!("/proc/{tid}/comm")).is_ok();
+        let named = process_name(tid);
+        drop(tx);
+        handle.join().unwrap();
+        assert_ne!(tid, std::process::id());
+        assert!(comm_readable, "thread {tid}");
+        assert_eq!(named, None, "thread {tid}");
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]

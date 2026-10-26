@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use hypomnesis::{
     GpuProcessEntry, SpillReport, SpillTracker, device_info, gpu_process_listing, process_exists,
-    snapshot_is_spilling,
+    process_name, snapshot_is_spilling,
 };
 
 use crate::format::{
@@ -58,6 +58,13 @@ struct WatchedPidState {
     /// Name from the most recent sample that saw this PID; `None` once
     /// no sample has ever resolved one.
     last_name: Option<String>,
+    /// The latest name a direct lookup ([`hypomnesis::process_name`]) gave
+    /// while this PID was missing from the listing (since v0.2.15). It
+    /// fills the NAME cell and the closing summary only, never
+    /// [`Self::last_name`] or the PID-reuse reset: its spelling can differ
+    /// from the listing's (the `nvidia-smi` fallback's), which would fake a
+    /// reuse.
+    looked_up_name: Option<String>,
     /// Whether the unresolved-growth hint has already fired for this
     /// PID (fires at most once per watch).
     growth_hint_fired: bool,
@@ -79,6 +86,7 @@ impl WatchedPidState {
             peak_used_bytes: used_bytes,
             peak_shared_bytes: shared_bytes,
             last_name: None,
+            looked_up_name: None,
             growth_hint_fired: false,
             ever_paged: false,
         }
@@ -141,7 +149,10 @@ impl WatchState {
 struct WatchSampleRow {
     /// Process ID.
     pid: u32,
-    /// Process name from this sample; `None` renders as `?`.
+    /// Process name from this sample: the listing's, or, for a PID missing
+    /// from it, a direct lookup's (since v0.2.15). `None` renders as `?`:
+    /// the listing could not name the process, or a missing PID names no
+    /// process or an unreadable one.
     name: Option<String>,
     /// Committed bytes this sample.
     used_bytes: u64,
@@ -172,7 +183,8 @@ struct WatchSampleRow {
 pub struct WatchPidSummary {
     /// Process ID.
     pub pid: u32,
-    /// Name from the most recent sample that resolved one.
+    /// Name from the most recent sample that resolved one, else the latest
+    /// direct lookup's for a PID the listing never named.
     pub name: Option<String>,
     /// Committed bytes at the first sample.
     pub baseline_used_bytes: u64,
@@ -250,8 +262,12 @@ fn sleep_interruptibly(total: Duration, interrupted: &AtomicBool) {
 /// one rendered [`WatchSampleRow`] per watched PID (in `watched`'s
 /// order). A watched PID absent from `rows` renders as `0 B` / `0 B` for
 /// this interval — `hmn watch` cannot distinguish "exited" from
-/// "currently holds no GPU memory" and does not try to (see the `Watch`
-/// subcommand's doc comment).
+/// "currently holds no GPU memory" by bytes and does not try to (see the
+/// `Watch` subcommand's doc comment). Its name comes from `name_of`
+/// (`hypomnesis::process_name` in `run_watch`, a stub in tests), so a live
+/// process on another GPU, or holding no GPU memory, is named rather than
+/// shown as `?` (since v0.2.15); the looked-up name is for display and the
+/// closing summary only (see [`WatchedPidState::looked_up_name`]).
 ///
 /// `watched` need not be the same slice across calls — under
 /// `--follow-new` it's recomputed every interval — and a PID re-entering
@@ -281,6 +297,7 @@ fn process_sample(
     watched: &[u32],
     elapsed: Duration,
     tracker: Option<&mut SpillTracker>,
+    name_of: impl Fn(u32) -> Option<String>,
 ) -> Vec<WatchSampleRow> {
     // `None` — not `Some(false)` — when there's no way to tell:
     // `tracker: None` (construction failed) or this instance isn't
@@ -362,6 +379,19 @@ fn process_sample(
         if paged == Some(true) {
             entry.ever_paged = true;
         }
+
+        // A PID the listing lacks is named by a direct lookup, after every
+        // use of the listing's name above, so the lookup reaches neither the
+        // reuse reset nor `last_name`.
+        let name = if found.is_some() {
+            name
+        } else {
+            let looked_up = name_of(pid);
+            if looked_up.is_some() {
+                entry.looked_up_name.clone_from(&looked_up);
+            }
+            looked_up
+        };
 
         out.push(WatchSampleRow {
             pid,
@@ -449,18 +479,23 @@ fn watch_table(name_width: usize) -> Table {
 /// The `NAME` column width for this watch: the longest name among the
 /// `watched` PIDs in the attach-time listing `rows`, as the table measures
 /// widths (bytes), so the header printed once fits every name it will
-/// head. The [`WATCH_COLUMNS`] floor applies on top. An unresolved or
-/// absent PID contributes the `?` it renders as. Names are never cut: a
-/// name is the process's identity, and what `--filter` matches.
+/// head. The [`WATCH_COLUMNS`] floor applies on top. A PID absent from
+/// `rows` contributes the name `name_of` gives it, as [`process_sample`]
+/// renders it, and an unresolved one the `?` it renders as. Names are never
+/// cut: a name is the process's identity, and what `--filter` matches.
 #[must_use]
-fn watch_name_width(rows: &[GpuProcessEntry], watched: &[u32]) -> usize {
+fn watch_name_width(
+    rows: &[GpuProcessEntry],
+    watched: &[u32],
+    name_of: impl Fn(u32) -> Option<String>,
+) -> usize {
     watched
         .iter()
-        .map(|pid| {
-            rows.iter()
-                .find(|e| e.pid == *pid)
-                .and_then(|e| e.name.as_deref())
-                .map_or(1, str::len)
+        .map(|&pid| {
+            rows.iter().find(|e| e.pid == pid).map_or_else(
+                || name_of(pid).map_or(1, |name| name.len()),
+                |entry| entry.name.as_deref().map_or(1, str::len),
+            )
         })
         .max()
         .unwrap_or(0)
@@ -539,6 +574,32 @@ fn format_watch_per_pid_block(per_pid: &[WatchPidSummary]) -> String {
     }
     let header_prefix = "hmn watch: per-PID  ";
     table.render(Some(header_prefix), &" ".repeat(header_prefix.len()))
+}
+
+/// The closing per-PID summaries, one per PID in `state`'s first-sighting
+/// order. A PID's name is the listing's latest, else the latest direct
+/// lookup's for a PID the listing never named
+/// ([`WatchedPidState::looked_up_name`]), so a watched process on another
+/// GPU is named in the summary as in its rows. `paged` is `None` unless
+/// spill was `measurable` for the run.
+#[must_use]
+fn per_pid_summaries(state: &WatchState, measurable: bool) -> Vec<WatchPidSummary> {
+    state
+        .seen_order
+        .iter()
+        .map(|&pid| {
+            let s = state.by_pid.get(&pid);
+            WatchPidSummary {
+                pid,
+                name: s.and_then(|s| s.last_name.clone().or_else(|| s.looked_up_name.clone())),
+                baseline_used_bytes: s.map_or(0, |s| s.baseline_used_bytes),
+                peak_used_bytes: s.map_or(0, |s| s.peak_used_bytes),
+                baseline_shared_bytes: s.map_or(0, |s| s.baseline_shared_bytes),
+                peak_shared_bytes: s.map_or(0, |s| s.peak_shared_bytes),
+                paged: measurable.then(|| s.is_some_and(|s| s.ever_paged)),
+            }
+        })
+        .collect()
 }
 
 /// Format the closing summary in text mode: the adapter-level report
@@ -1154,7 +1215,7 @@ pub fn run_watch(
     let mut watched = first.pids;
     // Sized once, from the processes watched at attach, so the header and
     // every interval's rows share one NAME width.
-    let name_width = watch_name_width(&first_rows, &watched);
+    let name_width = watch_name_width(&first_rows, &watched, process_name);
     if watched.is_empty() {
         let top = selection.top;
         let criterion = selection.criterion();
@@ -1246,6 +1307,7 @@ pub fn run_watch(
         &watched,
         Duration::ZERO,
         tracker.as_mut(),
+        process_name,
     );
     if json {
         print!(
@@ -1303,7 +1365,14 @@ pub fn run_watch(
             watched = next.pids;
         }
 
-        let sample = process_sample(&rows, &mut state, &watched, elapsed, tracker.as_mut());
+        let sample = process_sample(
+            &rows,
+            &mut state,
+            &watched,
+            elapsed,
+            tracker.as_mut(),
+            process_name,
+        );
         if json {
             print!("{}", format_watch_rows_json(elapsed, wall_clock, &sample));
         } else {
@@ -1314,22 +1383,7 @@ pub fn run_watch(
     let report = tracker.map(SpillTracker::into_report);
     // A per-PID paged verdict only where spill was measurable at all.
     let measurable = report.as_ref().is_some_and(|r| r.measurable);
-    let per_pid: Vec<WatchPidSummary> = state
-        .seen_order
-        .iter()
-        .map(|&pid| {
-            let s = state.by_pid.get(&pid);
-            WatchPidSummary {
-                pid,
-                name: s.and_then(|s| s.last_name.clone()),
-                baseline_used_bytes: s.map_or(0, |s| s.baseline_used_bytes),
-                peak_used_bytes: s.map_or(0, |s| s.peak_used_bytes),
-                baseline_shared_bytes: s.map_or(0, |s| s.baseline_shared_bytes),
-                peak_shared_bytes: s.map_or(0, |s| s.peak_shared_bytes),
-                paged: measurable.then(|| s.is_some_and(|s| s.ever_paged)),
-            }
-        })
-        .collect();
+    let per_pid = per_pid_summaries(&state, measurable);
 
     if json {
         print!(
@@ -1528,10 +1582,20 @@ mod tests {
             entry(3, None, 0, 0),
         ];
         // Only watched PIDs count; 2 is not watched.
-        assert_eq!(watch_name_width(&rows, &[1, 3]), 14);
-        // Unresolved (`None`) and absent PIDs render as `?`.
-        assert_eq!(watch_name_width(&rows, &[3, 99]), 1);
-        assert_eq!(watch_name_width(&rows, &[]), 0);
+        assert_eq!(watch_name_width(&rows, &[1, 3], no_lookup), 14);
+        // Unresolved (`None`) and unnamed absent PIDs render as `?`.
+        assert_eq!(watch_name_width(&rows, &[3, 99], no_lookup), 1);
+        assert_eq!(watch_name_width(&rows, &[], no_lookup), 0);
+        // An absent PID the lookup names is as wide as that name.
+        let lookup = |pid: u32| (pid == 99).then(|| "systemd".to_owned());
+        assert_eq!(watch_name_width(&rows, &[3, 99], lookup), 7);
+    }
+
+    /// The name lookup of a test that wants none: every absent PID stays
+    /// unnamed, whatever runs on the test host.
+    #[cfg(feature = "test-helpers")]
+    const fn no_lookup(_pid: u32) -> Option<String> {
+        None
     }
 
     #[test]
@@ -1704,7 +1768,7 @@ mod tests {
     fn process_sample_first_interval_zero_delta() {
         let mut state = WatchState::new();
         let rows = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let out = process_sample(&rows, &mut state, &[100], Duration::ZERO, None);
+        let out = process_sample(&rows, &mut state, &[100], Duration::ZERO, None, no_lookup);
         assert_eq!(out.len(), 1);
         let row = out.first().unwrap();
         assert_eq!(row.used_bytes, 8_000);
@@ -1720,9 +1784,16 @@ mod tests {
     fn process_sample_second_interval_computes_delta() {
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, Some("python.exe"), 9_500, 300)];
-        let out = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let out = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         let row = out.first().unwrap();
         assert_eq!(row.used_delta, 1_500);
         assert_eq!(row.shared_delta, 200);
@@ -1733,7 +1804,7 @@ mod tests {
     fn process_sample_missing_pid_renders_zero() {
         let mut state = WatchState::new();
         let rows: Vec<GpuProcessEntry> = vec![];
-        let out = process_sample(&rows, &mut state, &[42], Duration::ZERO, None);
+        let out = process_sample(&rows, &mut state, &[42], Duration::ZERO, None, no_lookup);
         assert_eq!(out.len(), 1);
         let row = out.first().unwrap();
         assert_eq!(row.pid, 42);
@@ -1741,14 +1812,137 @@ mod tests {
         assert_eq!(row.name, None);
     }
 
+    /// A lookup that names PID 1 `systemd` and nothing else.
+    #[cfg(feature = "test-helpers")]
+    fn systemd_lookup(pid: u32) -> Option<String> {
+        (pid == 1).then(|| "systemd".to_owned())
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn process_sample_names_a_missing_pid_by_the_lookup() {
+        // Issue #4, note 2: a live process absent from the watched
+        // device's listing (PID 1 holds no GPU memory) read `?`.
+        let mut state = WatchState::new();
+        let rows: Vec<GpuProcessEntry> = vec![];
+        let out = process_sample(
+            &rows,
+            &mut state,
+            &[1],
+            Duration::ZERO,
+            None,
+            systemd_lookup,
+        );
+        let row = out.first().unwrap();
+        assert_eq!(row.name.as_deref(), Some("systemd"));
+        assert_eq!(row.used_bytes, 0);
+        let entry = state.by_pid.get(&1).unwrap();
+        assert_eq!(entry.last_name, None, "the lookup never becomes last_name");
+        assert_eq!(entry.looked_up_name.as_deref(), Some("systemd"));
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn process_sample_missing_dead_pid_stays_unnamed() {
+        // A PID that names no process: the lookup finds nothing, and the
+        // row keeps `?` (the attach warning says why).
+        let mut state = WatchState::new();
+        let rows: Vec<GpuProcessEntry> = vec![];
+        let out = process_sample(
+            &rows,
+            &mut state,
+            &[42],
+            Duration::ZERO,
+            None,
+            systemd_lookup,
+        );
+        assert_eq!(out.first().unwrap().name, None);
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn process_sample_lookup_never_resets_a_listed_pid() {
+        // The listing names PID 100 `python3`; while it is absent the
+        // lookup spells it differently (as the nvidia-smi fallback might).
+        // The row shows the lookup, but neither `last_name` nor the
+        // baseline moves, and its return under the listing's name is no
+        // "PID reuse".
+        let lookup = |pid: u32| (pid == 100).then(|| "/usr/bin/python3".to_owned());
+        let mut state = WatchState::new();
+        let rows0 = vec![entry(100, Some("python3"), 1_000, 0)];
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, lookup);
+        let out = process_sample(
+            &[],
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            lookup,
+        );
+        assert_eq!(
+            out.first().unwrap().name.as_deref(),
+            Some("/usr/bin/python3")
+        );
+        let rows2 = vec![entry(100, Some("python3"), 2_000, 0)];
+        let _ = process_sample(
+            &rows2,
+            &mut state,
+            &[100],
+            Duration::from_secs(10),
+            None,
+            lookup,
+        );
+        let entry = state.by_pid.get(&100).unwrap();
+        assert_eq!(entry.last_name.as_deref(), Some("python3"));
+        assert_eq!(entry.baseline_used_bytes, 1_000, "no reset");
+        assert_eq!(entry.peak_used_bytes, 2_000);
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn per_pid_summaries_name_a_never_listed_pid_from_the_lookup() {
+        // PID 100 is listed as `a.exe`; PID 1 never is, and the summary
+        // names it as its rows did. The listing's name wins over a lookup.
+        let lookup = |pid: u32| match pid {
+            1 => Some("systemd".to_owned()),
+            100 => Some("other-spelling".to_owned()),
+            _ => None,
+        };
+        let mut state = WatchState::new();
+        let rows0 = vec![entry(100, Some("a.exe"), 1_000, 0)];
+        let _ = process_sample(&rows0, &mut state, &[100, 1], Duration::ZERO, None, lookup);
+        let _ = process_sample(
+            &[],
+            &mut state,
+            &[100, 1],
+            Duration::from_secs(5),
+            None,
+            lookup,
+        );
+        let summaries = per_pid_summaries(&state, false);
+        let names: Vec<_> = summaries
+            .iter()
+            .map(|s| (s.pid, s.name.as_deref()))
+            .collect();
+        assert_eq!(names, [(100, Some("a.exe")), (1, Some("systemd"))]);
+        assert!(summaries.iter().all(|s| s.paged.is_none()));
+    }
+
     #[cfg(feature = "test-helpers")]
     #[test]
     fn process_sample_peak_tracked_across_samples() {
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, Some("python.exe"), 5_000, 50)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         let s = state.by_pid.get(&100).unwrap();
         assert_eq!(s.peak_used_bytes, 8_000);
         assert_eq!(s.peak_shared_bytes, 100);
@@ -1765,12 +1959,26 @@ mod tests {
         // process's reading rather than mixing the two.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, Some("python.exe"), 9_000, 500)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
 
         let rows2 = vec![entry(100, Some("notepad.exe"), 200, 10)];
-        let out = process_sample(&rows2, &mut state, &[100], Duration::from_secs(10), None);
+        let out = process_sample(
+            &rows2,
+            &mut state,
+            &[100],
+            Duration::from_secs(10),
+            None,
+            no_lookup,
+        );
         let row = out.first().unwrap();
         assert_eq!(row.name.as_deref(), Some("notepad.exe"));
         // Delta is 0 on the reset sample — comparing against the
@@ -1794,11 +2002,25 @@ mod tests {
         // across the None sample, so the baseline is undisturbed.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, None, 8_500, 150)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         let rows2 = vec![entry(100, Some("python.exe"), 9_000, 200)];
-        let out = process_sample(&rows2, &mut state, &[100], Duration::from_secs(10), None);
+        let out = process_sample(
+            &rows2,
+            &mut state,
+            &[100],
+            Duration::from_secs(10),
+            None,
+            no_lookup,
+        );
         let row = out.first().unwrap();
         // Baseline never reset: delta is against the unresolved
         // sample's prev (8_500 / 150), not a fresh 0.
@@ -1816,11 +2038,25 @@ mod tests {
         // "the OS recycled this PID" and reset the baseline.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, Some("[protected]"), 8_500, 150)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         let rows2 = vec![entry(100, Some("python.exe"), 9_000, 200)];
-        let out = process_sample(&rows2, &mut state, &[100], Duration::from_secs(10), None);
+        let out = process_sample(
+            &rows2,
+            &mut state,
+            &[100],
+            Duration::from_secs(10),
+            None,
+            no_lookup,
+        );
         let row = out.first().unwrap();
         assert_eq!(row.used_delta, 500);
         assert_eq!(row.shared_delta, 50);
@@ -1835,11 +2071,25 @@ mod tests {
         // across the flicker), so the real reuse at rows2 still resets.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("python.exe"), 8_000, 100)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let rows1 = vec![entry(100, Some("[protected]"), 8_500, 150)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         let rows2 = vec![entry(100, Some("notepad.exe"), 200, 10)];
-        let out = process_sample(&rows2, &mut state, &[100], Duration::from_secs(10), None);
+        let out = process_sample(
+            &rows2,
+            &mut state,
+            &[100],
+            Duration::from_secs(10),
+            None,
+            no_lookup,
+        );
         let row = out.first().unwrap();
         assert_eq!(row.used_delta, 0);
         assert_eq!(row.shared_delta, 0);
@@ -1858,10 +2108,17 @@ mod tests {
         // fallback and only genuinely-protected rows stay unresolved.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("[protected]"), 0, 0)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let grown = UNRESOLVED_GROWTH_HINT_BYTES;
         let rows1 = vec![entry(100, Some("[protected]"), grown, 0)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         assert!(state.by_pid.get(&100).unwrap().growth_hint_fired);
     }
 
@@ -1875,10 +2132,17 @@ mod tests {
         // `None`/`[protected]`.
         let mut state = WatchState::new();
         let rows0 = vec![entry(100, Some("[exited]"), 0, 0)];
-        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None);
+        let _ = process_sample(&rows0, &mut state, &[100], Duration::ZERO, None, no_lookup);
         let grown = UNRESOLVED_GROWTH_HINT_BYTES;
         let rows1 = vec![entry(100, Some("[exited]"), grown, 0)];
-        let _ = process_sample(&rows1, &mut state, &[100], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[100],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         assert!(!state.by_pid.get(&100).unwrap().growth_hint_fired);
     }
 
@@ -1937,7 +2201,14 @@ mod tests {
             entry(100, Some("a.exe"), 1_000, 0),
             entry(200, Some("b.exe"), 500, 0),
         ];
-        let _ = process_sample(&rows0, &mut state, &[100, 200], Duration::ZERO, None);
+        let _ = process_sample(
+            &rows0,
+            &mut state,
+            &[100, 200],
+            Duration::ZERO,
+            None,
+            no_lookup,
+        );
 
         // pid 100 is genuinely excluded from `watched` this interval
         // even though it's still present in `rows` at a different
@@ -1947,7 +2218,14 @@ mod tests {
             entry(100, Some("a.exe"), 9_000, 0),
             entry(200, Some("b.exe"), 600, 0),
         ];
-        let _ = process_sample(&rows1, &mut state, &[200], Duration::from_secs(5), None);
+        let _ = process_sample(
+            &rows1,
+            &mut state,
+            &[200],
+            Duration::from_secs(5),
+            None,
+            no_lookup,
+        );
         assert_eq!(
             state.by_pid.get(&100).unwrap().peak_used_bytes,
             1_000,
@@ -1967,6 +2245,7 @@ mod tests {
             &[100, 200],
             Duration::from_secs(10),
             None,
+            no_lookup,
         );
         let row100 = out.iter().find(|r| r.pid == 100).unwrap();
         assert_eq!(row100.used_delta, 200); // 1_200 - 1_000, not 1_200 - 9_000

@@ -795,6 +795,21 @@ fn read_proc_pidpath_basename(pid: i32) -> Result<String, i32> {
     }
 }
 
+/// The name of process `pid`, as the process listing names its rows:
+/// `proc_pidpath`'s basename, else `p_comm` where the sandbox refuses the
+/// path ([`name_after_pidpath`]).
+fn name_of(pid: i32) -> Option<String> {
+    name_after_pidpath(read_proc_pidpath_basename(pid), || {
+        kern_proc_pid_comm(pid).and_then(|comm| comm_to_name(&comm))
+    })
+}
+
+/// [`name_of`] for a `u32` PID; `None` for one past `i32::MAX`, which no
+/// macOS PID reaches. Backs [`crate::gpu::process_name`] on macOS.
+pub(super) fn process_name(pid: u32) -> Option<String> {
+    name_of(i32::try_from(pid).ok()?)
+}
+
 /// A process's name: `proc_pidpath`'s basename when it answered, else
 /// `comm()` when the caller's sandbox refused it (`EPERM`).
 ///
@@ -1187,9 +1202,7 @@ pub(super) fn list_processes(device_index: u32) -> Option<MetalProcessList> {
         let Ok(pid_u32) = u32::try_from(pid) else {
             continue;
         };
-        let name = name_after_pidpath(read_proc_pidpath_basename(pid), || {
-            kern_proc_pid_comm(pid).and_then(|comm| comm_to_name(&comm))
-        });
+        let name = name_of(pid);
         entries.push(crate::GpuProcessEntry {
             pid: pid_u32,
             name,

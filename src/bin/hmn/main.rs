@@ -154,7 +154,10 @@ mod watch;
                   elevated). The Windows kernel itself (PID 4) renders as `[kernel]`, not \
                   `?` or `[protected]`. This distinction is Windows-only; Linux and macOS \
                   unresolved rows remain a bare `?`/absent name. On Linux, run as the \
-                  owning user or with `sudo` to resolve one.\n\
+                  owning user or with `sudo` to resolve one. In `hmn watch`, a watched PID \
+                  missing from the device's listing (on another GPU, or holding no GPU \
+                  memory) is named by a direct lookup (since v0.2.15), so its `?` too means \
+                  an unresolved name, or a process that is gone.\n\
                   - Security note: a `[protected]` row (or, on Linux, a bare `?`) that \
                   does not resolve under elevation is worth investigating — by construction \
                   it is either a process owned by another user, a process running as \
@@ -347,8 +350,11 @@ enum Commands {
     /// `--filter` and `--min` narrow that choice by name and by size. A
     /// watched PID that stops appearing in the per-process listing
     /// (exited, or simply holds no GPU memory right now) renders as 0
-    /// bytes each interval — `hmn watch` does not distinguish the two;
-    /// it does not auto-stop on this basis, use `--duration` or Ctrl+C.
+    /// bytes each interval — `hmn watch` does not distinguish the two by
+    /// bytes; it does not auto-stop on this basis, use `--duration` or
+    /// Ctrl+C. Its NAME comes from a direct lookup (since v0.2.15), so a
+    /// live process on another GPU or holding no GPU memory reads its
+    /// name, and `?` means the process is gone or its name unreadable.
     /// At attach it does check each explicit PID: one that names no
     /// running process gets a one-line warning on stderr (since
     /// v0.2.13), and so does one that is unreadable here (a macOS

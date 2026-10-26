@@ -320,6 +320,17 @@ makes any Foundation program abort inside Apple's `libdispatch` before
 `hmn` code runs: `hmn ps` exits 133 under it, while `hmn --version` exits
 0. That is the profile, not an `hmn` bug.
 
+**In `hmn watch`, a watched PID that is missing from the device's listing**
+— on another GPU, or holding no GPU memory, like PID 1 — is named by a
+direct lookup (`hypomnesis::process_name`, since v0.2.15), so its NAME is
+the process's own: before v0.2.15 it read `?` though the name was readable.
+`?` there now means what it means everywhere else, an unresolved name, or a
+process that is gone; a PID that names no process also gets the attach
+warning `names no running process`. The lookup only names the row and the
+closing summary: a name it spells differently from the listing (the
+`nvidia-smi` fallback's) never resets the PID's baseline as a PID reuse
+would.
+
 ## Why is there no `hmn kill` or `hmn spill --kill`?
 
 Scope discipline: hypomnesis is **measurement, not control** (Principle 6 in

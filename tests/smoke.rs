@@ -222,3 +222,12 @@ fn process_exists_is_reachable_and_never_denies_this_process() {
     // in; `Some(false)` for the test process itself never is.
     assert_ne!(hypomnesis::process_exists(std::process::id()), Some(false));
 }
+
+#[test]
+fn process_name_is_reachable_and_names_this_process_when_it_can() {
+    // `None` is allowed where no lookup source is compiled in; a name, when
+    // given, is never empty.
+    if let Some(name) = hypomnesis::process_name(std::process::id()) {
+        assert_ne!(name, "");
+    }
+}

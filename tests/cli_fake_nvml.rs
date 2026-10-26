@@ -176,6 +176,27 @@ impl Drop for Sleeper {
     }
 }
 
+/// The PID of a process that has just exited and been reaped: a PID that
+/// names no process, as a typo or a finished job would.
+#[allow(clippy::expect_used)] // test-only
+fn dead_pid() -> String {
+    let mut child = Command::new("true").spawn().expect("failed to start true");
+    let pid = child.id().to_string();
+    let _ = child.wait();
+    pid
+}
+
+/// Whether `text` holds a line whose words include `pid` followed by
+/// `name`: a `hmn watch` row (time, PID, NAME, …) or a per-PID summary row.
+fn count_named_rows(text: &str, pid: &str, name: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.windows(2).any(|pair| pair == [pid, name])
+        })
+        .count()
+}
+
 /// Whether `stderr` holds `line` as a whole line: a line, not the whole of
 /// stderr, since `debug-output` builds trace there too.
 fn has_line(stderr: &str, line: &str) -> bool {
@@ -517,6 +538,58 @@ fn ps_says_there_is_no_gpu_to_list() {
         ),
         "stderr: {}",
         run.stderr
+    );
+}
+
+/// A watched PID absent from the device's listing is named by a direct
+/// lookup, in its rows, the per-PID summary and `--json`, where v0.2.14
+/// printed `?` (issue #4, note 2): PID 1 is alive, readable and holds no
+/// GPU memory. A PID that names no process keeps `?` and its warning.
+#[test]
+fn watch_names_a_pid_absent_from_the_listing() {
+    let Some(fake) = FakeNvml::build("watch-name") else {
+        return;
+    };
+    let Ok(comm) = std::fs::read_to_string("/proc/1/comm") else {
+        // A `/proc` mounted with `hidepid`: PID 1 cannot be named here.
+        return;
+    };
+    let init = comm.trim();
+    let dead = dead_pid();
+    let env = [("FAKE_NVML_DEVICES", "NVIDIA H100 NVL")];
+    let args = ["watch", "1", &dead, "--interval", "1s", "--duration", "1s"];
+    let run = fake.hmn(&args, &env);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    // At least the attach row and the per-PID summary row.
+    assert!(
+        count_named_rows(&run.stdout, "1", init) >= 2,
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        count_named_rows(&run.stdout, &dead, "?") >= 2,
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        has_line(
+            &run.stderr,
+            &format!("hmn watch: pid={dead} names no running process; its rows will read 0 MiB")
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let json = fake.hmn(&json_args, &env).stdout;
+    assert!(
+        json.contains(&format!("\"pid\":1,\"name\":\"{init}\"")),
+        "json: {json}"
+    );
+    assert!(
+        json.contains(&format!("\"pid\":{dead},\"name\":null")),
+        "json: {json}"
     );
 }
 

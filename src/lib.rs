@@ -60,7 +60,8 @@ pub mod report;
 
 pub use error::{HypomnesisError, Result};
 pub use gpu::{
-    device_count, device_info, gpu_process_listing, gpu_processes, process_exists, process_gpu_info,
+    device_count, device_info, gpu_process_listing, gpu_processes, process_exists,
+    process_gpu_info, process_name,
 };
 pub use ram::process_rss;
 pub use snapshot::{

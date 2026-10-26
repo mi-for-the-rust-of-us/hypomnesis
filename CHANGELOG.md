@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`process_name(pid)`** (`src/gpu/mod.rs`, `src/gpu/metal.rs`, `src/gpu/proc_name.rs`,
+  `src/lib.rs`) — the name of a process, spelled as the process listings spell it, or `None`; a
+  sibling of `process_exists`. Linux reads `/proc/<pid>/comm`, extended past its 15-byte cut from
+  the `exe` link or `argv[0]`, behind the same thread-ID guard as `process_exists` (the module is
+  now compiled on Linux whatever the features); Windows asks `OpenProcess` and then the
+  `Toolhelp32` snapshot, PID 4 reading `[kernel]` and never `[exited]` or `[protected]`; macOS
+  asks `proc_pidpath`, then `p_comm` where a sandbox refuses the path. Item 9 of
+  [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
+
 ### Changed
 
 - **`NoGpuSource` names only the backends the platform has** (`src/error.rs`) — on Linux, and
@@ -73,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already failed; the `Snapshot::all` docs now state the order this relies on (the counted devices
   first, in index order). Every subcommand now returns its own exit code, so `main`'s `Ok`/`Err`
   fold, whose generic `1` only `hmn` still used, is gone. Issue #4, note 5; item 8.
+
+- **`hmn watch` names a watched PID the listing lacks** (`src/bin/hmn/watch.rs`, `main.rs`) — a
+  watched PID absent from the watched device's listing (on another GPU, or holding no GPU memory,
+  like PID 1) read `?` in NAME though its name was readable, and `?` means an unresolved name. Its
+  name now comes from `process_name`, in the rows, the closing per-PID summary and `--json`; a PID
+  that names no process keeps `?` and its attach warning. The looked-up name never feeds the
+  PID-reuse reset or the name the listing gave, so a different spelling (the `nvidia-smi`
+  fallback's) cannot fake a reuse. Issue #4, note 2; item 9.
 
 ### Documentation
 
