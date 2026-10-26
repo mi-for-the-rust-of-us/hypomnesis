@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   From `ROADMAP.md`'s v0.2.14 follow-ups; item 2 of
   [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
+- **CI documents the three docs.rs targets with every feature and with none**
+  (`.github/workflows/ci.yml`, `.github/workflows/publish.yml`) — the doc job built only
+  `--all-features` for Linux, so it never saw the link above break. It is now a matrix over
+  `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, each with
+  `--all-features` and `--no-default-features`, all cross-documented on Ubuntu as docs.rs does;
+  the publish workflow adds the `--no-default-features` build. Item 3.
+
 ## [0.2.14] - 2026-10-09
 
 Answers a field check of v0.2.13 on Apple Silicon

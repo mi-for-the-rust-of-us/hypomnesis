@@ -262,12 +262,13 @@ Items that *might* land, gated on real consumer demand:
   review of PR C) — the refused set is read once, at attach, so a refused process that starts later
   is neither followed nor counted. At minimum a sentence in the `watch` docs; a per-interval count
   if a consumer needs it.
-- **`cargo doc` for macOS without default features** (surfaced by v0.2.14's review of PR C) — the
-  intra-doc link to `GpuQuerySource::Pdh` in `src/gpu/mod.rs` does not resolve when the import is
-  `cfg`'d out, so `RUSTDOCFLAGS=-D warnings cargo doc --target aarch64-apple-darwin
-  --no-default-features` fails (pre-existing). CI's doc job only builds
-  `--all-features` on Ubuntu, so it never sees this; a plain-backtick mention fixes the link, and a
-  macOS / no-default-features doc leg would keep it fixed.
+- ~~**`cargo doc` for macOS without default features**~~ — *Done in v0.2.15* (surfaced by
+  v0.2.14's review of PR C). The intra-doc link to `GpuQuerySource::Pdh` in `src/gpu/mod.rs`
+  resolved only through a `use` that a backend feature compiles, so `--no-default-features` doc
+  builds failed on every OS, not only on macOS. It now names its full path, under a label that does
+  not resolve on its own (a plain backtick would have lost the link), and CI's doc job builds the
+  three docs.rs targets with every feature and with none (`docs/roadmap-v0.2.15.md`, items 2
+  and 3).
 
 ---
 

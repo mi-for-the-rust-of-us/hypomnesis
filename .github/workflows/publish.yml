@@ -83,6 +83,14 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      # The other docs.rs targets are documented by ci.yml, which must be
+      # green before a tag; this catches a link that resolves only when a
+      # backend feature is on.
+      - name: Doc check (no default features)
+        run: cargo doc --locked --no-default-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
       # The verification build `cargo publish` would otherwise run in the job
       # that holds `id-token: write`.
       - name: Package and verify

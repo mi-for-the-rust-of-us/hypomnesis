@@ -61,8 +61,18 @@ jobs:
   doc:
     # Separate doc-check job: catches broken intra-doc links early
     # (publish.yml also runs this, but waiting until release is too late).
-    name: Doc check
+    # A link can resolve under one feature set or target and not another
+    # (a `use` that only some features compile), so the docs are built for
+    # the three targets docs.rs builds, each with every feature and with
+    # none. Cross-documenting needs only the target's standard library, so
+    # every leg runs on Ubuntu, as docs.rs does.
+    name: Doc check (${{ matrix.target }}, ${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
+        features: ["--all-features", "--no-default-features"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,11 +81,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master (v1)
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Doc check
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --locked --no-deps --target ${{ matrix.target }} ${{ matrix.features }}
         env:
           RUSTDOCFLAGS: "-D warnings"
 
