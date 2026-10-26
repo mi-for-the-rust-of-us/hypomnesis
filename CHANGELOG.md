@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so touches no GPU. From the review of the v0.2.14 Linux field check
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6.
 
+### Documentation
+
+- **The docs build without default features** (`src/gpu/mod.rs`, `CONVENTIONS.md`) — the link to
+  `GpuQuerySource::Pdh` in `gpu_processes`'s docs resolved only through a `use` compiled when a
+  backend feature is on, so `RUSTDOCFLAGS=-D warnings cargo doc --no-default-features` failed on
+  every OS, not only on macOS as `ROADMAP.md` had it. The link now names its full path, under a
+  label that does not resolve on its own (one that does trips rustdoc's
+  `redundant_explicit_links` where the `use` is compiled), and `CONVENTIONS.md` states that rule.
+  From `ROADMAP.md`'s v0.2.14 follow-ups; item 2 of
+  [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
+
 ## [0.2.14] - 2026-10-09
 
 Answers a field check of v0.2.13 on Apple Silicon

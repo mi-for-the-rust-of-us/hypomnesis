@@ -388,8 +388,9 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///    consistent with the Linux `/proc/<pid>/comm` and macOS
 ///    `proc_pidpath` patterns). Returns **every** process holding GPU
 ///    memory — compositor, browsers, games, compute alike — because
-///    `VidMm`'s accounting is not compute-only. See
-///    [`GpuQuerySource::Pdh`] doc-comment for the semantics shift.
+///    `VidMm`'s accounting is not compute-only. See the doc-comment of
+///    the [`Pdh`](crate::GpuQuerySource::Pdh) source for the semantics
+///    shift.
 /// 4. `nvidia-smi` (fallback) — subprocess
 ///    `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits --id=N`.
 ///    Reached on `Linux` when `NVML` is missing, or on `Windows` when

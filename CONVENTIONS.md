@@ -66,6 +66,17 @@ Within a feature-gated module, intra-doc links to other items in the same
 module are safe. Cross-module links between feature-gated areas are safe
 when the linked target is in the same feature set as the linker.
 
+A target that is always compiled but reached through a `cfg`-gated `use`
+counts as gated for this rule, since the bare name resolves only when the
+`use` is compiled. Link it by its full path instead, which keeps the link,
+under a label that does not resolve on its own: where the `use` is
+compiled, a label that resolves to the same target trips rustdoc's
+`redundant_explicit_links` lint.
+
+> ✅ `` /// See the [`Pdh`](crate::GpuQuerySource::Pdh) source. ``
+> ❌ `` /// See [`GpuQuerySource::Pdh`]. `` (resolves only through a gated `use`)
+> ❌ `` /// See [`GpuQuerySource::Pdh`](crate::GpuQuerySource::Pdh). `` (redundant where the `use` is compiled)
+
 ### Field-Level Docs
 
 Every field of every `pub` struct must carry a `///` doc comment describing:

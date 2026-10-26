@@ -93,8 +93,10 @@ says so (item 12).
 - **Link a target that is always compiled by its crate path** (item 2). The link to
   `GpuQuerySource::Pdh` in `gpu_processes`'s docs (`src/gpu/mod.rs:392`) resolves only through a
   `use` that is compiled when a backend feature is on, so any `--no-default-features` doc build
-  fails, on every OS. The enum is never gated, so ``[`GpuQuerySource::Pdh`](crate::GpuQuerySource::Pdh)``
-  keeps the link; `CONVENTIONS.md` gains one sentence for that case.
+  fails, on every OS. The enum is never gated, so a full path keeps the link:
+  ``[`Pdh`](crate::GpuQuerySource::Pdh)``, under a label that does not resolve on its own, since
+  ``[`GpuQuerySource::Pdh`](crate::GpuQuerySource::Pdh)`` trips rustdoc's
+  `redundant_explicit_links` wherever the `use` is compiled. `CONVENTIONS.md` gains that rule.
 - **Cross-document from Ubuntu** (item 3). The doc job becomes a matrix over the three docs.rs
   targets × {`--all-features`, `--no-default-features`}, all on `ubuntu-latest`, as docs.rs builds
   them; no macOS runner minutes.
@@ -162,7 +164,7 @@ says so (item 12).
 | # | Item | Kind | Status |
 |---|---|---|---|
 | 1 | `device_count` tells a broken NVIDIA stack from no GPU (finding 6) | **fix** | ✅ `43bd592` |
-| 2 | The `GpuQuerySource::Pdh` link resolves under every feature set | docs | ⬜ |
+| 2 | The `GpuQuerySource::Pdh` link resolves under every feature set | docs | ✅ |
 | 3 | CI doc legs: three targets × all / no default features | build | ⬜ |
 | 4 | A fake NVML stand-in for Linux CI | test only | ⬜ |
 | 5 | `NoGpuSource` names only the backends of the platform (finding 5) | fix | ⬜ |
