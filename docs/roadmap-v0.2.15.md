@@ -166,7 +166,7 @@ says so (item 12).
 | 1 | `device_count` tells a broken NVIDIA stack from no GPU (finding 6) | **fix** | ✅ `43bd592` |
 | 2 | The `GpuQuerySource::Pdh` link resolves under every feature set | docs | ✅ |
 | 3 | CI doc legs: three targets × all / no default features | build | ✅ |
-| 4 | A fake NVML stand-in for Linux CI | test only | ⬜ |
+| 4 | A fake NVML stand-in for Linux CI | test only | ✅ |
 | 5 | `NoGpuSource` names only the backends of the platform (finding 5) | fix | ⬜ |
 | 6 | `hmn ps` GPU column (note 3) | feature | ⬜ |
 | 7 | `hmn ps` says there is no GPU to list (note 6) | feature | ⬜ |
