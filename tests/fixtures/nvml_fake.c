@@ -18,8 +18,13 @@
  *                             compute processes, `bytes` a decimal u64.
  *
  * Every device has TOTAL_BYTES, of which RESERVED_BYTES is reserved, and
- * the driver reads DRIVER_VERSION. The structs match the repr(C) layouts in
- * src/gpu/nvml.rs, pinned by the _Static_asserts below. */
+ * the driver reads DRIVER_VERSION; the memory figures count a device's
+ * process rows up to what it can hold, so `free` never wraps. Limits: at
+ * most MAX_DEVICES devices and MAX_PROCS rows (the rest are ignored, so
+ * the crate's retry past 64 rows cannot be driven from here), and an empty
+ * entry in FAKE_NVML_DEVICES (`"A,"`) is a device with an empty name. The
+ * structs match the repr(C) layouts in src/gpu/nvml.rs, pinned by the
+ * _Static_asserts below. */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -167,16 +172,21 @@ static const struct device *device_of(nvmlDevice_t device, struct device devs[MA
     return &devs[handle - 1];
 }
 
-/* The bytes the processes of device `index` hold; a row larger than the
- * device (the R570 u64::MAX sentinel included) is left out, as NVML's own
- * device figure would not count it. */
+/* The bytes the processes of device `index` hold, at most what is left
+ * after the reserve, so the free figures below never wrap; a row larger
+ * than the device (the R570 u64::MAX sentinel included) is left out, as
+ * NVML's own device figure would not count it. */
 static uint64_t process_bytes(unsigned index) {
+    const uint64_t room = TOTAL_BYTES - RESERVED_BYTES;
     struct proc procs[MAX_PROCS];
     unsigned n = parse_procs(procs);
     uint64_t sum = 0;
     for (unsigned i = 0; i < n; i++) {
         if (procs[i].dev == index && procs[i].bytes <= TOTAL_BYTES) {
             sum += procs[i].bytes;
+            if (sum > room) {
+                sum = room;
+            }
         }
     }
     return sum;

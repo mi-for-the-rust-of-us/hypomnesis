@@ -439,8 +439,9 @@ const fn ps_exit_code(
 ///
 /// Returns the exit code, as every subcommand does: `0` normally; `1`
 /// under `exit_status` (`--exit-status`) when no process is listed and
-/// every device tried answered, so `hmn ps --filter canvas --exit-status` is a one-line "is
-/// my job on the GPU?" gate, as `pgrep` is for processes; `2` when a
+/// every device tried answered, so `hmn ps --filter canvas --exit-status`
+/// is a one-line "is my job on the GPU?" gate, as `pgrep` is for
+/// processes; `2` when a
 /// device named by `--device` cannot be listed — out of range (`device
 /// index 3 out of range (have 1 devices)`, the library's own bounds
 /// check) or failing outright. With `--device`, the user asked for that

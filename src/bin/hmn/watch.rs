@@ -1164,6 +1164,7 @@ fn other_device_hint(found: &[(u32, Vec<u32>)], criterion: bool) -> Option<Strin
             let noun = if pids.len() == 1 {
                 format!("a {one}")
             } else {
+                // BORROW: explicit to_owned — both arms give an owned String.
                 many.to_owned()
             };
             Some(format!(
@@ -1187,16 +1188,18 @@ fn other_device_hint(found: &[(u32, Vec<u32>)], criterion: bool) -> Option<Strin
 }
 
 /// The stderr line when attach selected nothing on `device`, which holds
-/// `listed` processes. With none, the v0.2.14 lines, byte for byte; with
-/// some (none matching), it says so, where v0.2.14 said "found no GPU
-/// processes" though the device held another user's (issue #4, note 1):
+/// `listed` processes. With none, the v0.2.14 opening (`found no GPU
+/// processes on device 0 to auto-select`, or `… yet`); with some (none
+/// matching), it says so, where v0.2.14 said "found no GPU processes"
+/// though the device held another user's (issue #4, note 1):
 /// `hmn: watch found 1 GPU process on device 0, none to auto-select (top 5
 /// among names containing "x" (case-insensitive)); <tail>`. Without
 /// `--follow-new` the tail is `hint` when another device has what the
 /// selection wants ([`other_device_hint`]), else the advice to re-run with
 /// an explicit PID; under `--follow-new` it is `waiting for work to
-/// appear`, and the caller prints the hint on a line of its own. `because`
-/// is the unreadable clause, `; `-led, or empty.
+/// appear`, and the caller prints the hint on a line of its own. So the
+/// v0.2.14 lines come back byte for byte only with no process on `device`
+/// and no hint. `because` is the unreadable clause, `; `-led, or empty.
 #[must_use]
 fn nothing_selected_message(
     device: u32,
@@ -2917,6 +2920,20 @@ mod tests {
             nothing_selected_message(0, 0, &follow, "", None),
             "hmn: watch found no GPU processes on device 0 yet (top 3 by committed among names \
              containing \"spillforge\" (case-insensitive)); waiting for work to appear"
+        );
+        // An empty device with a match elsewhere: the hint replaces the
+        // re-run advice, so this line is not the v0.2.14 one.
+        assert_eq!(
+            nothing_selected_message(
+                0,
+                0,
+                &auto,
+                "",
+                Some("device 1 has a match (pid 7): re-run with --device 1")
+            ),
+            "hmn: watch found no GPU processes on device 0 to auto-select (top 5 among names \
+             containing \"fieldcheck\" (case-insensitive)); device 1 has a match (pid 7): \
+             re-run with --device 1"
         );
         // A device holding processes, none matching: the issue #4 case.
         assert_eq!(

@@ -225,9 +225,16 @@ fn process_exists_is_reachable_and_never_denies_this_process() {
 
 #[test]
 fn process_name_is_reachable_and_names_this_process_when_it_can() {
-    // `None` is allowed where no lookup source is compiled in; a name, when
-    // given, is never empty.
-    if let Some(name) = hypomnesis::process_name(std::process::id()) {
+    // `None` is allowed only where no lookup source is compiled in; a name,
+    // when given, is never empty.
+    let name = hypomnesis::process_name(std::process::id());
+    #[cfg(any(
+        target_os = "linux",
+        all(windows, feature = "pdh"),
+        all(target_os = "macos", feature = "metal")
+    ))]
+    assert!(name.is_some(), "this process could not be named");
+    if let Some(name) = name {
         assert_ne!(name, "");
     }
 }

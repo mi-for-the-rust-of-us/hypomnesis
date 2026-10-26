@@ -83,7 +83,11 @@ impl FakeNvml {
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nvml_fake.c");
         let built = Command::new(&cc)
-            .args(["-std=c11", "-shared", "-fPIC", "-o"])
+            // Warnings are errors, so the fake stays as clean as it was
+            // written (gcc and clang, `-pedantic` included).
+            .args([
+                "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC", "-o",
+            ])
             .arg(fake.lib().join("libnvidia-ml.so.1"))
             .arg(&source)
             .output();
@@ -186,8 +190,8 @@ fn dead_pid() -> String {
     pid
 }
 
-/// Whether `text` holds a line whose words include `pid` followed by
-/// `name`: a `hmn watch` row (time, PID, NAME, …) or a per-PID summary row.
+/// The number of lines in `text` whose words include `pid` followed by
+/// `name`: `hmn watch` rows (time, PID, NAME, …) and per-PID summary rows.
 fn count_named_rows(text: &str, pid: &str, name: &str) -> usize {
     text.lines()
         .filter(|line| {
@@ -326,7 +330,7 @@ fn ps_exits_2_naming_the_count_call_when_it_fails() {
     );
 }
 
-/// `hmn` with no subcommand exits `1` with the reason and nothing on
+/// `hmn` with no subcommand exits `2` with the reason and nothing on
 /// stdout, `--json` included, where v0.2.14 printed `hmn: no visible
 /// GPUs.` and exited `0`.
 #[test]
@@ -542,13 +546,14 @@ fn ps_gpu_column_tells_two_gpus_of_one_model_apart() {
         run.stdout
     );
 
+    // One object per GPU, each carrying its own index.
     let json = fake.hmn(&["ps", "--json"], &env).stdout;
     for index in [0, 1] {
-        assert!(
-            json.contains(&format!("\"pid\":{pid},"))
-                && json.contains(&format!("\"device_index\":{index},")),
-            "json: {json}"
+        let object = format!(
+            "{{\"pid\":{pid},\"name\":\"sleep\",\"used_bytes\":1073741824,\
+             \"shared_used_bytes\":0,\"device_index\":{index},"
         );
+        assert!(json.contains(&object), "no {object} in json: {json}");
     }
 }
 
@@ -596,28 +601,39 @@ fn ps_says_there_is_no_gpu_to_list() {
     );
 }
 
+/// The file name of this test binary, as `hmn` names its process: Cargo
+/// names it `cli_fake_nvml-<16 hex digits>`, past the kernel's 15-byte
+/// `comm` cut, which `hmn` extends from the `exe` link (same user).
+#[allow(clippy::expect_used)] // test-only
+fn this_test_name() -> String {
+    std::env::current_exe()
+        .expect("no current exe")
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a UTF-8 file name")
+        .to_owned()
+}
+
 /// A watched PID absent from the device's listing is named by a direct
 /// lookup, in its rows, the per-PID summary and `--json`, where v0.2.14
-/// printed `?` (issue #4, note 2): PID 1 is alive, readable and holds no
-/// GPU memory. A PID that names no process keeps `?` and its warning.
+/// printed `?` (issue #4, note 2): this test's own process is alive,
+/// readable and holds no GPU memory, like the PID 1 of the field check. A
+/// PID that names no process keeps `?` and its warning.
 #[test]
 fn watch_names_a_pid_absent_from_the_listing() {
     let Some(fake) = FakeNvml::build("watch-name") else {
         return;
     };
-    let Ok(comm) = std::fs::read_to_string("/proc/1/comm") else {
-        // A `/proc` mounted with `hidepid`: PID 1 cannot be named here.
-        return;
-    };
-    let init = comm.trim();
+    let me = std::process::id().to_string();
+    let my_name = this_test_name();
     let dead = dead_pid();
     let env = [("FAKE_NVML_DEVICES", "NVIDIA H100 NVL")];
-    let args = ["watch", "1", &dead, "--interval", "1s", "--duration", "1s"];
+    let args = ["watch", &me, &dead, "--interval", "1s", "--duration", "1s"];
     let run = fake.hmn(&args, &env);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
     // At least the attach row and the per-PID summary row.
     assert!(
-        count_named_rows(&run.stdout, "1", init) >= 2,
+        count_named_rows(&run.stdout, &me, &my_name) >= 2,
         "stdout: {}",
         run.stdout
     );
@@ -639,7 +655,7 @@ fn watch_names_a_pid_absent_from_the_listing() {
     json_args.push("--json");
     let json = fake.hmn(&json_args, &env).stdout;
     assert!(
-        json.contains(&format!("\"pid\":1,\"name\":\"{init}\"")),
+        json.contains(&format!("\"pid\":{me},\"name\":\"{my_name}\"")),
         "json: {json}"
     );
     assert!(
@@ -661,8 +677,10 @@ fn watch_auto_select_names_the_device_where_the_filter_matches() {
     };
     let job = Sleeper::start();
     let pid = job.pid();
-    // PID 1 (not a `sleep`) holds memory on GPU 0, the job on GPU 1.
-    let procs = format!("0:1:1073741824,1:{pid}:1073741824");
+    // This test's own process (not a `sleep`, whatever PID 1 is in a
+    // container) holds memory on GPU 0, the job on GPU 1.
+    let me = std::process::id();
+    let procs = format!("0:{me}:1073741824,1:{pid}:1073741824");
     let env = [
         ("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,NVIDIA H100 NVL"),
         ("FAKE_NVML_PROCS", procs.as_str()),

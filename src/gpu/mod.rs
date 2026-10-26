@@ -715,10 +715,13 @@ pub fn process_exists(pid: u32) -> Option<bool> {
 /// | anything else | — | always |
 ///
 /// Unlike [`gpu_processes`], it never returns the Windows `[exited]` or
-/// `[protected]` brackets: a process it cannot name is `None`. The listing
-/// a `nvidia-smi` fallback produces takes `nvidia-smi`'s own spelling,
-/// which may differ. The answer is a snapshot: the PID can exit, or be
-/// reused, the moment after.
+/// `[protected]` brackets the listing writes: a process it cannot name is
+/// `None`. A name the system itself brackets still comes through, as the
+/// `Toolhelp32` snapshot's `[System Process]` for Windows' PID 0. The
+/// listing a `nvidia-smi` fallback produces takes `nvidia-smi`'s own
+/// spelling, which may differ. The answer is a snapshot: the PID can exit,
+/// or be reused by an unrelated process, the moment after, and a zombie
+/// (exited, not yet reaped) still has its name.
 ///
 /// Added in v0.2.15 for `hmn watch`, which names a watched PID that is
 /// missing from the watched device's listing (on another GPU, or holding
