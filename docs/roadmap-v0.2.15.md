@@ -106,8 +106,8 @@ says so (item 12).
   init and count codes), exports the nine symbols the crate resolves, with structs pinned by
   `_Static_assert` to `nvml.rs`'s `repr(C)` layouts. Loaded through `LD_LIBRARY_PATH`, with no
   `nvidia-smi` on `PATH`, it touches no GPU, so the tests run on every Linux host and on CI. It
-  replaces `43bd592`'s single-purpose `nvml_broken.c` (renamed, history kept). Without a C
-  compiler the tests skip locally and fail when `CI` is set.
+  replaces `43bd592`'s single-purpose `nvml_broken.c` (see *Decisions taken* for its history).
+  Without a C compiler the tests skip locally and fail when `CI` is set.
 - **Each platform's `NoGpuSource` names its own backends** (item 5). Windows keeps
   `NVML, DXGI, PDH, and nvidia-smi` byte for byte and macOS keeps its v0.2.14 list; elsewhere the
   text reads `no GPU measurement source available (NVML and nvidia-smi both failed or are
@@ -184,19 +184,58 @@ remains.
 
 ## Verification
 
-To be filled in as items land.
+The tree at `ffd3ba8`, on 2026-10-26, on the reference machine (Windows 11, RTX 5060 Ti) and in
+its Ubuntu WSL2, whose NVML lists no processes, so the multi-GPU paths ran against the fake
+NVML (item 4) and the single-GPU ones live on Windows.
+
+| What had to be true | How it was shown |
+|---|---|
+| The gate set passes on both CI toolchains and both host OSes | `cargo fmt --check`, both `--no-default-features` checks, clippy with default and all features, `cargo test --all-features`, on Windows (1.99.1, 1.88) and WSL (1.99.0, 1.88); WSL's `--no-default-features` library tests too |
+| The docs build everywhere CI and docs.rs build them | `RUSTDOCFLAGS=-D warnings cargo doc` for linux-gnu, windows-msvc and aarch64-apple-darwin, each with all features and none (from Windows and, as CI runs it, cross-documented from WSL), and `--document-private-items`; macOS clippy via `--target aarch64-apple-darwin` |
+| The fake NVML is sound | built under `-std=c11 -Wall -Wextra -Werror -pedantic` by gcc and clang; its nine symbols checked with `nm`; 14 tests, every one also failing without it (they need its devices) |
+| The new tests discriminate | the same fake scenarios run against v0.2.14's `hmn` reproduce the field check: two identical rows for one process on two H100s, a lost GPU dropped silently with exit `0`, `?` for PID 1 in `hmn watch` |
+| `process_name` refuses a thread | the thread reads its ID from `/proc/thread-self`; 400 runs, none failing (a first version found the thread by its name and raced the kernel's naming) |
+| The single-GPU paths are unchanged live | `hmn` and `hmn --json` on the RTX 5060 Ti as before; `hmn ps` re-captured with the GPU column for the README; `hmn watch` names a SYSTEM `svchost.exe` holding no GPU memory, `?` before, non-elevated; an empty `--filter` counts the device's 24 processes and exits `2` |
+| The links hold | every relative link and anchor in the touched docs resolves (a GitHub-style slug check) |
+
+Each item's commit ran its own subset of these before it landed.
 
 ---
 
 ## Consistency pass
 
-To be run with fresh eyes after the last commit.
+To be run with fresh eyes after this commit: reviewing agents audit `020d6c0..HEAD`, which
+includes `43bd592`, for `CONVENTIONS.md`, correctness and test quality, and doc drift, and report
+findings without fixing them.
 
 ---
 
 ## Decisions taken
 
-To be filled in as items land.
+Raised with the maintainer on 2026-10-26, before the first commit:
+
+- **Scope:** issue #4 notes 1, 2, 3, 5 and 6, finding 5, the doc link with its CI legs, and the
+  `--follow-new` sentence. Deferred: unified `spill_condition` (its own release), names for denied
+  PIDs (macOS, no consumer yet), `nvidia-smi` hardening (waits for real output).
+- **A separate `GPU` column**, not the index inside DEVICE.
+- **`hmn` exits `2` when it can tell nothing**, as `hmn ps` does, so `43bd592`'s exit `1` became
+  `2` before any release.
+- **`hmn watch` stays single-device** and says where the work is, rather than switching device
+  on its own; under `--follow-new` too, with the hint on a line of its own.
+- **Every missing watched PID is looked up**, not only one never named: a process that was listed
+  and went idle shows its name too.
+- **`(no GPU to list)`**, not `(no visible GPUs)`, which `hmn` would contradict on an iGPU-only
+  Windows PC.
+- **A fake NVML for Linux CI**, so the issue #4 paths are tested on every push.
+
+Taken while implementing:
+
+- **The doc link names its full path under a label that does not resolve on its own.** The plain
+  path link the plan proposed trips `rustdoc::redundant_explicit_links` wherever the `use` is
+  compiled; `CONVENTIONS.md` records the rule.
+- **The fake replaces `nvml_broken.c` rather than sitting beside it.** The file is renamed, but
+  the rewrite leaves too little in common for git to follow the rename: history is under the old
+  name.
 
 ---
 
