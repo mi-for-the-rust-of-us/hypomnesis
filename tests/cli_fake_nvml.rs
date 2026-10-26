@@ -182,6 +182,13 @@ fn has_line(stderr: &str, line: &str) -> bool {
     stderr.lines().any(|l| l == line)
 }
 
+/// The first word of `row` under `column` of `header`: the table aligns
+/// every cell with its header word.
+fn cell<'a>(header: &str, row: &'a str, column: &str) -> Option<&'a str> {
+    let start = header.find(column)?;
+    row.get(start..)?.split_whitespace().next()
+}
+
 /// The table rows of `stdout` whose first column is `pid`.
 fn rows_of<'a>(stdout: &'a str, pid: &str) -> Vec<&'a str> {
     stdout
@@ -327,6 +334,47 @@ fn ps_skips_a_lost_device_naming_the_linux_backends() {
         "stdout: {}",
         run.stdout
     );
+}
+
+/// One process on both GPUs of a node whose GPUs are one model: the GPU
+/// column tells the two rows apart, where v0.2.14 printed two identical
+/// rows (issue #4, note 3); `--json` carries the same indices.
+#[test]
+fn ps_gpu_column_tells_two_gpus_of_one_model_apart() {
+    let Some(fake) = FakeNvml::build("ps-gpu-column") else {
+        return;
+    };
+    let job = Sleeper::start();
+    let pid = job.pid();
+    let procs = format!("0:{pid}:1073741824,1:{pid}:1073741824");
+    let env = [
+        ("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,NVIDIA H100 NVL"),
+        ("FAKE_NVML_PROCS", procs.as_str()),
+    ];
+    let run = fake.hmn(&["ps"], &env);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    let header = run.stdout.lines().next().unwrap_or_default();
+    assert_eq!(
+        header.split_whitespace().collect::<Vec<_>>(),
+        ["PID", "NAME", "VRAM", "SHARED", "GPU", "DEVICE", "SPILL"]
+    );
+    let rows = rows_of(&run.stdout, &pid);
+    let gpus: Vec<_> = rows.iter().map(|row| cell(header, row, "GPU")).collect();
+    assert_eq!(gpus, [Some("0"), Some("1")], "stdout: {}", run.stdout);
+    assert!(
+        rows.iter().all(|row| row.contains("NVIDIA H100 NVL")),
+        "stdout: {}",
+        run.stdout
+    );
+
+    let json = fake.hmn(&["ps", "--json"], &env).stdout;
+    for index in [0, 1] {
+        assert!(
+            json.contains(&format!("\"pid\":{pid},"))
+                && json.contains(&format!("\"device_index\":{index},")),
+            "json: {json}"
+        );
+    }
 }
 
 /// The control: a fake that works reads as a GPU, every figure from the

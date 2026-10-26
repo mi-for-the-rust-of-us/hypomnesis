@@ -106,9 +106,9 @@ SHARED column of `hmn ps` (the same quantity as Task Manager's
 
 ```
 $ hmn ps
-PID    NAME         VRAM      SHARED   DEVICE                      SPILL
-21844  python.exe   15.8 GiB  2.9 GiB  NVIDIA GeForce RTX 5060 Ti  PAGED
-3524   firefox.exe  866 MiB   25 MiB   NVIDIA GeForce RTX 5060 Ti  device
+PID    NAME         VRAM      SHARED   GPU  DEVICE                      SPILL
+21844  python.exe   15.8 GiB  2.9 GiB  0    NVIDIA GeForce RTX 5060 Ti  PAGED
+3524   firefox.exe  866 MiB   25 MiB   0    NVIDIA GeForce RTX 5060 Ti  device
 ...
 hmn: 24 GPU processes found (18.1 GiB committed total); device 0 spilling: 212 MiB free, 3.0 GiB shared, 1 process paged.
 ```

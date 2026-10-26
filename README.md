@@ -132,12 +132,12 @@ GPU 0 [NVIDIA GeForce RTX 5060 Ti]: free 13284 MiB / 16311 MiB (259 MiB reserved
 $ hmn --json                              # same data, scriptable
 [{"index":0,"name":"NVIDIA GeForce RTX 5060 Ti","total_bytes":17103323136,"free_bytes":14967820288,"used_bytes":2135502848,"reserved_bytes":271581184,"driver_version":"610.88"}]
 
-$ hmn ps                                  # who's holding it? (top rows shown; SPILL since v0.2.11)
-PID    NAME                         VRAM     SHARED  DEVICE                      SPILL
-26796  firefox.exe                  1.5 GiB  10 MiB  NVIDIA GeForce RTX 5060 Ti  no
-29092  dwm.exe                      1.2 GiB  3 MiB   NVIDIA GeForce RTX 5060 Ti  no
-21324  SamsungMagician.exe          268 MiB  0 MiB   NVIDIA GeForce RTX 5060 Ti  no
-9584   claude.exe                   242 MiB  0 MiB   NVIDIA GeForce RTX 5060 Ti  no
+$ hmn ps                                  # who's holding it? (top rows shown; GPU since v0.2.15)
+PID    NAME                         VRAM     SHARED  GPU  DEVICE                      SPILL
+27992  dwm.exe                      1.0 GiB  2 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
+26064  firefox.exe                  413 MiB  16 MiB  0    NVIDIA GeForce RTX 5060 Ti  no
+24952  Discord.exe                  365 MiB  0 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
+2840   Code.exe                     324 MiB  4 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
 ...
 
 $ hmn spill -- .\spillforge.exe           # is this run spilling? (the release-validation
@@ -242,10 +242,13 @@ GPU 1 [Intel Iris Xe Graphics]: free 32768 MiB / 32768 MiB
 `hmn ps` (illustrative — empty on machines with no active CUDA workload):
 
 ```
-PID    NAME              VRAM      SHARED   DEVICE                      SPILL
-12345  lm-studio.exe     8.2 GiB   45 MiB   NVIDIA GeForce RTX 5060 Ti  no
-67890  python.exe        1.4 GiB   0 MiB    NVIDIA GeForce RTX 5060 Ti  no
+PID    NAME              VRAM      SHARED   GPU  DEVICE                      SPILL
+12345  lm-studio.exe     8.2 GiB   45 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
+67890  python.exe        1.4 GiB   0 MiB    0    NVIDIA GeForce RTX 5060 Ti  no
 ```
+
+GPU is the device index (since v0.2.15), so on a node whose GPUs are all one model the rows of
+different GPUs read apart; DEVICE is the model name, `?` when it is unknown.
 
 A one-line summary is written to **stderr** after each `hmn ps` run:
 
@@ -272,13 +275,13 @@ The stderr summary is printed even when the table is empty (except when every de
 5. **(Windows) `?` in the NAME column is now rare.** Before v0.2.8, any PID `OpenProcess` couldn't resolve — including plenty of ordinary foreign-user/`SYSTEM` processes like `dwm.exe` and `csrss.exe` — rendered as a bare `?`. As of v0.2.8, a `Toolhelp32Snapshot` fallback resolves those the same way `Get-Process`/Task Manager do (a system-wide process enumeration that reads names without opening a per-process handle, so it isn't subject to the same access check `OpenProcess` is), collapsing the vast majority of former `?` rows to real names non-elevated:
 
    ```
-   PID    NAME                         VRAM     SHARED  DEVICE                      SPILL
-   29092  dwm.exe                      1.2 GiB  2 MiB   NVIDIA GeForce RTX 5060 Ti  no
-   19100  csrss.exe                    74 MiB   31 MiB  NVIDIA GeForce RTX 5060 Ti  no
-   4      [kernel]                     4 MiB    0 MiB   NVIDIA GeForce RTX 5060 Ti  no
+   PID    NAME                         VRAM     SHARED  GPU  DEVICE                      SPILL
+   27992  dwm.exe                      1.0 GiB  2 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
+   11376  csrss.exe                    74 MiB   31 MiB  0    NVIDIA GeForce RTX 5060 Ti  no
+   4      [kernel]                     4 MiB    0 MiB   0    NVIDIA GeForce RTX 5060 Ti  no
    ```
 
-   *(real capture, non-elevated shell, v0.2.11 — both `dwm.exe`/`csrss.exe` rows rendered `?` before v0.2.8; SPILL added this release)*
+   *(real capture, non-elevated shell, v0.2.15 — both `dwm.exe`/`csrss.exe` rows rendered `?` before v0.2.8)*
 
    What remains genuinely unresolvable now renders as one of two honest brackets instead of an anonymous `?`: **`[exited]`** — the process exited between `hypomnesis`'s VRAM sample and the name lookup; elevation would not help, this is a timing race, not a permission wall. **`[protected]`** — the `Toolhelp32Snapshot` fallback itself could not be taken (very rare — resource exhaustion), so "exited" vs. "still running but unresolvable" can't be told apart. The Windows kernel itself (`PID 4`) continues to render as `[kernel]`, not `?` or `[protected]` — there is no executable image to read, so it's special-cased. This `[exited]`/`[protected]` distinction is Windows-only; Linux/macOS unresolved rows remain a bare `?` in the table (`name: None` underneath), since there is no equivalent false-wall-vs-real-wall gap to collapse there — see the [FAQ](docs/FAQ.md#what-does-a--in-the-name-column-mean--and-when-do-i-need-elevation) for the platform breakdown.
 

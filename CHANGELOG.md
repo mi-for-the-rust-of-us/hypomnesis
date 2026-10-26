@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 5; item 5
   of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
+- **`hmn ps` shows which GPU each row is on** (`src/bin/hmn/ps.rs`) — the table gains a `GPU`
+  column, the device index, before DEVICE: `PID NAME VRAM SHARED GPU DEVICE SPILL`. On a node
+  whose GPUs are all one model, DEVICE alone read the same on every row, and one process on two
+  GPUs printed two identical rows. An unknown model name now reads `?` in DEVICE, where it read
+  `GPU N`, which would repeat the new column. `--json` already carried `device_index` and is
+  unchanged. The README transcripts are re-captured. Issue #4, note 3; item 6.
+
 ### Fixed
 
 - **An NVIDIA driver that is installed but fails to start no longer reads as "no GPU"**

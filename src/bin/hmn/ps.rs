@@ -37,7 +37,8 @@ pub struct PsRow {
     /// Zero-based device index (NVML-canonical).
     pub device_index: u32,
     /// Friendly device name (e.g. `RTX 5060 Ti`); `None` when
-    /// `device_info` failed for this index.
+    /// `device_info` failed for this index, or gave no name (the
+    /// `nvidia-smi` fallback), and the table's DEVICE cell reads `?`.
     pub device_name: Option<String>,
     /// One-shot spill check ([`hypomnesis::snapshot_is_spilling`]) for
     /// this row's device, computed once per device and broadcast to
@@ -496,7 +497,8 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
         // Look up the device once: its name for the DEVICE column, its
         // free VRAM for a spilling device's summary clause. Failure here
         // is non-fatal: row's `device_name` falls back to None and the
-        // formatter renders `GPU N` instead; the clause omits free VRAM.
+        // formatter renders `?` in DEVICE (GPU still carries the index);
+        // the clause omits free VRAM.
         let info = device_info(idx).ok();
         let free_bytes = info.as_ref().map(|d| d.free_bytes);
         let device_name = info.and_then(|d| d.name);
@@ -802,10 +804,12 @@ fn format_ps_summary(rows: &[PsRow], filters: &PsFilters, notes: &SummaryNotes) 
     format_ps_summary_with(rows, filters, notes, REMEDY_OUTSIDE_SANDBOX)
 }
 
-/// Format `ps` rows as a fixed-column text table. Always prints the
-/// header, even when `rows` is empty.
+/// Format `ps` rows as a fixed-column text table: PID, NAME, VRAM, SHARED,
+/// GPU (the device index, since v0.2.15, so two rows on two GPUs of one
+/// model read apart), DEVICE (its model name, `?` when unknown) and SPILL.
+/// Always prints the header, even when `rows` is empty.
 fn format_ps_table(rows: &[PsRow]) -> String {
-    let mut table = Table::new(&["PID", "NAME", "VRAM", "SHARED", "DEVICE", "SPILL"]);
+    let mut table = Table::new(&["PID", "NAME", "VRAM", "SHARED", "GPU", "DEVICE", "SPILL"]);
     for r in rows {
         table.push_row(vec![
             r.pid.to_string(),
@@ -814,9 +818,11 @@ fn format_ps_table(rows: &[PsRow]) -> String {
             r.name.as_deref().unwrap_or("?").to_owned(),
             format_vram(r.used_bytes),
             format_vram(r.shared_used_bytes),
-            r.device_name
-                .clone()
-                .unwrap_or_else(|| format!("GPU {}", r.device_index)),
+            r.device_index.to_string(),
+            // BORROW: explicit to_owned — the table owns its cells; an
+            // unknown model name reads "?", as an unresolved NAME does, not
+            // `GPU N`, which would repeat the GPU column.
+            r.device_name.clone().unwrap_or_else(|| "?".to_owned()),
             // BORROW: explicit to_owned — the table owns its cells.
             spill_cell(r.spilling, r.paged).to_owned(),
         ]);
@@ -1203,7 +1209,7 @@ mod tests {
     fn format_ps_table_empty_prints_header_only() {
         let s = format_ps_table(&[]);
         // Header line ends with newline; widths default to header lengths.
-        assert_eq!(s, "PID  NAME  VRAM  SHARED  DEVICE  SPILL\n");
+        assert_eq!(s, "PID  NAME  VRAM  SHARED  GPU  DEVICE  SPILL\n");
     }
 
     #[test]
@@ -1217,8 +1223,8 @@ mod tests {
         );
         let s = format_ps_table(&[r]);
         let expected = format!(
-            "PID    NAME        VRAM     SHARED  DEVICE       SPILL\n\
-             12345  python.exe  8.0 GiB  0 MiB   RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
+            "PID    NAME        VRAM     SHARED  GPU  DEVICE       SPILL\n\
+             12345  python.exe  8.0 GiB  0 MiB   0    RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
         );
         assert_eq!(s, expected);
     }
@@ -1226,14 +1232,14 @@ mod tests {
     #[test]
     fn format_ps_table_protected_name_renders_question_mark() {
         // Column widths: PID=3 (header), NAME=4 (header), VRAM=7
-        // ("256 MiB"), SHARED=6 (header), DEVICE=11 ("RTX 5060 Ti"),
-        // SPILL=5 (header — "?" and "n/a" are shorter). Two-space
-        // separators. The NAME `?` is on every platform.
+        // ("256 MiB"), SHARED=6 (header), GPU=3 (header), DEVICE=11
+        // ("RTX 5060 Ti"), SPILL=5 (header — "?" and "n/a" are shorter).
+        // Two-space separators. The NAME `?` is on every platform.
         let r = row(99, Some("?"), 268_435_456, 0, Some("RTX 5060 Ti"));
         let s = format_ps_table(&[r]);
         let expected = format!(
-            "PID  NAME  VRAM     SHARED  DEVICE       SPILL\n\
-             99   ?     256 MiB  0 MiB   RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
+            "PID  NAME  VRAM     SHARED  GPU  DEVICE       SPILL\n\
+             99   ?     256 MiB  0 MiB   0    RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
         );
         assert_eq!(s, expected);
     }
@@ -1245,8 +1251,8 @@ mod tests {
         let r = row(99, None, 268_435_456, 0, Some("RTX 5060 Ti"));
         let s = format_ps_table(&[r]);
         let expected = format!(
-            "PID  NAME  VRAM     SHARED  DEVICE       SPILL\n\
-             99   ?     256 MiB  0 MiB   RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
+            "PID  NAME  VRAM     SHARED  GPU  DEVICE       SPILL\n\
+             99   ?     256 MiB  0 MiB   0    RTX 5060 Ti  {UNKNOWN_SPILL}  \n"
         );
         assert_eq!(s, expected);
     }
@@ -1269,17 +1275,42 @@ mod tests {
             row_spilling(3, Some("d.exe"), None),
         ];
         let s = format_ps_table(&rows);
-        assert!(s.contains("a.exe  0 MiB  0 MiB   GPU 0   PAGED "));
-        assert!(s.contains("b.exe  0 MiB  0 MiB   GPU 0   device"));
-        assert!(s.contains("c.exe  0 MiB  0 MiB   GPU 0   no    "));
-        assert!(s.contains(&format!("d.exe  0 MiB  0 MiB   GPU 0   {UNKNOWN_SPILL}   ")));
+        // GPU=3 (header), DEVICE=6 (header; the unknown name reads `?`),
+        // SPILL=6 ("device").
+        assert!(s.contains("a.exe  0 MiB  0 MiB   0    ?       PAGED "));
+        assert!(s.contains("b.exe  0 MiB  0 MiB   0    ?       device"));
+        assert!(s.contains("c.exe  0 MiB  0 MiB   0    ?       no    "));
+        assert!(s.contains(&format!(
+            "d.exe  0 MiB  0 MiB   0    ?       {UNKNOWN_SPILL}   "
+        )));
     }
 
     #[test]
-    fn format_ps_table_falls_back_to_gpu_n_when_no_device_name() {
+    fn format_ps_table_unknown_device_name_renders_question_mark() {
+        // The index has its own column, so DEVICE reads `?`, not `GPU 3`.
         let r = row(99, Some("python.exe"), 268_435_456, 3, None);
         let s = format_ps_table(&[r]);
-        assert!(s.contains("python.exe  256 MiB  0 MiB   GPU 3"));
+        assert!(s.contains("python.exe  256 MiB  0 MiB   3    ?"), "{s}");
+        assert!(!s.contains("GPU 3"), "{s}");
+    }
+
+    #[test]
+    fn format_ps_table_tells_two_gpus_of_one_model_apart() {
+        // Issue #4: one process on both GPUs of a 2× H100 NVL node printed
+        // two identical rows; the GPU column separates them.
+        let rows = [
+            row(869_183, Some("holder"), 1 << 30, 0, Some("NVIDIA H100 NVL")),
+            row(869_183, Some("holder"), 1 << 30, 1, Some("NVIDIA H100 NVL")),
+        ];
+        let s = format_ps_table(&rows);
+        assert!(
+            s.contains("869183  holder  1.0 GiB  0 MiB   0    NVIDIA H100 NVL"),
+            "{s}"
+        );
+        assert!(
+            s.contains("869183  holder  1.0 GiB  0 MiB   1    NVIDIA H100 NVL"),
+            "{s}"
+        );
     }
 
     #[test]
