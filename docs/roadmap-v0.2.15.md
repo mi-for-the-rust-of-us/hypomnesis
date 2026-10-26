@@ -193,14 +193,16 @@ remains.
 
 The tree at `ffd3ba8`, on 2026-10-26, on the reference machine (Windows 11, RTX 5060 Ti) and in
 its Ubuntu WSL2, whose NVML lists no processes, so the multi-GPU paths ran against the fake
-NVML (item 4) and the single-GPU ones live on Windows.
+NVML (item 4) and the single-GPU ones live on Windows. The gate set, the doc matrix and the
+discrimination check were run again on the tree after the consistency pass (`e5c7a3e`), all
+passing, with 15 fake-NVML tests.
 
 | What had to be true | How it was shown |
 |---|---|
 | The gate set passes on both CI toolchains and both host OSes | `cargo fmt --check`, both `--no-default-features` checks, clippy with default and all features, `cargo test --all-features`, on Windows (1.99.1, 1.88) and WSL (1.99.0, 1.88); WSL's `--no-default-features` library tests too |
 | The docs build everywhere CI and docs.rs build them | `RUSTDOCFLAGS=-D warnings cargo doc` for linux-gnu, windows-msvc and aarch64-apple-darwin, each with all features and none (from Windows and, as CI runs it, cross-documented from WSL), and `--document-private-items`; macOS clippy via `--target aarch64-apple-darwin` |
-| The fake NVML is sound | built under `-std=c11 -Wall -Wextra -Werror -pedantic` by gcc and clang; its nine symbols checked with `nm`; 14 tests, every one also failing without it (they need its devices) |
-| The new tests discriminate | the same fake scenarios run against v0.2.14's `hmn` reproduce the field check: two identical rows for one process on two H100s, a lost GPU dropped silently with exit `0`, `?` for PID 1 in `hmn watch` |
+| The fake NVML is sound | built under `-std=c11 -Wall -Wextra -Werror -pedantic` by gcc and clang; its nine symbols checked with `nm`; the tests build it with `-Werror` |
+| The new tests discriminate | the same fake scenarios run against v0.2.14's `hmn` reproduce the field check: two identical rows for one process on two H100s, a lost GPU dropped silently with exit `0`, `?` for PID 1 in `hmn watch`; and the audit dropped the new test file into an export of v0.2.14, where 13 of its then 14 tests failed, only the control passing |
 | `process_name` refuses a thread | the thread reads its ID from `/proc/thread-self`; 400 runs, none failing (a first version found the thread by its name and raced the kernel's naming) |
 | The single-GPU paths are unchanged live | `hmn` and `hmn --json` on the RTX 5060 Ti as before; `hmn ps` re-captured with the GPU column for the README; `hmn watch` names a SYSTEM `svchost.exe` holding no GPU memory, `?` before, non-elevated; an empty `--filter` counts the device's 24 processes and exits `2` |
 | The links hold | every relative link and anchor in the touched docs resolves (a GitHub-style slug check) |
@@ -211,9 +213,48 @@ Each item's commit ran its own subset of these before it landed.
 
 ## Consistency pass
 
-To be run with fresh eyes after this commit: reviewing agents audit `020d6c0..HEAD`, which
-includes `43bd592`, for `CONVENTIONS.md`, correctness and test quality, and doc drift, and report
-findings without fixing them.
+After the last item, three fresh agents that had not seen the work audited `020d6c0..296cb7d`,
+which includes `43bd592`: one against `CONVENTIONS.md`, one adversarially for correctness and test
+quality, one for drift between the docs and the code. They reported findings only; none was a
+blocker. Adopted, in three commits:
+
+- **Two correctness gaps on the "no GPU" / "can't tell" line**, fixed in `e14473b` and recorded
+  under *Decisions taken*: `nvmlInit_v2` codes 9 and 28 read as no GPU, and on Windows a `DXGI`
+  zero no longer hides a broken `NVML`.
+- **Code, tests and CI** (`71ff411`):
+  - neither watch test depends on what PID 1 is (a container's `sleep infinity`, or a long
+    entrypoint name, broke them);
+  - the GPU-column JSON check matches one object per GPU;
+  - the fake is built with `-Werror`, counts a device's rows only up to what it holds (its `free`
+    wrapped to about 16 EiB), and documents its limits;
+  - the `process_name` smoke test requires a name where a lookup source exists;
+  - a test pins the empty-device watch line with a hint;
+  - each doc leg keeps its own `rust-cache` key;
+  - a `BORROW` annotation, two test doc comments and a doc wrap.
+- **Docs** (`e5c7a3e`):
+  - the empty-device watch line is unchanged only without a hint (CHANGELOG, this roadmap, the
+    code doc);
+  - `hmn`'s other failures exit `2`, where they exited `1` (a sixth behaviour change);
+  - the FAQ's exit-`1` sentence, log-scan advice, Slurm provenance and watch `?` paragraph;
+  - the tutorial's process count and its NAME and PID-reuse caveats;
+  - the README's "by its bytes";
+  - the `--json` doc and the CHANGELOG's details and item numbers;
+  - the `lib.rs` capability table;
+  - and the broken `# Errors` anchor in `CONVENTIONS.md`.
+
+Left as they are:
+
+- `hmn: N GPU(s) enumerated but none readable.` keeps its trailing period, byte for byte, like
+  `hmn: no visible GPUs.`: it reads as a statement, not a reason line.
+- The other-device probe runs only when the watched device lists. A lost watched device exits `2`
+  with its reason and no pointer elsewhere, and a PID the watched device holds is not looked for
+  on others. Both are by design: the probe answers "the work is not here".
+- Two commit bodies (`ffd3ba8` without a "Key changes:" heading, `6e0760f`'s "contributed by
+  contributor") stay as committed rather than rewriting history.
+- The fake cannot drive the retry past 64 process rows, and no test covers a device that answers
+  only when `hmn` asks a second time; the fake is stateless.
+- `hf-fetch-model`'s `friendly_error` will print `NVML backend reported: NVML error: …`, naming
+  `NVML` twice; that is for its own next release.
 
 ---
 
