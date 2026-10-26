@@ -81,19 +81,21 @@ pub enum HypomnesisError {
 
     /// No GPU measurement source was usable.
     ///
-    /// Returned when `NVML`, `DXGI`, `PDH`, and `nvidia-smi` all failed
-    /// (or were disabled by feature flags) for a single query, unless the
-    /// `NVML` library loaded but could not start or count, which is
+    /// Returned when every GPU backend compiled for the platform failed (or
+    /// was disabled by feature flags) for a single query, unless the `NVML`
+    /// library loaded but could not start or count, which is
     /// [`Self::Nvml`] instead (since v0.2.15). From [`crate::device_count`]
     /// it means no count source is installed, which a caller may read as
-    /// zero GPUs. On macOS,
-    /// `Metal` replaces `DXGI` and `PDH`, and the message names `Metal`,
-    /// `NVML`, and `nvidia-smi`. On macOS, [`crate::gpu_processes`] and
-    /// [`crate::gpu_process_listing`] also return it when the caller's
-    /// sandbox refuses `proc_listpids` and no `sysctl` listing can stand in,
-    /// for example when `KERN_PROC_ALL` is refused, or is allowed while
-    /// `KERN_PROC_PID`, which vouches for its record size, is refused; the
-    /// sandbox is then the cause, though the message names the backends.
+    /// zero GPUs. The message names the platform's backends: `NVML`,
+    /// `DXGI`, `PDH` and `nvidia-smi` on Windows; `Metal`, `NVML` and
+    /// `nvidia-smi` on macOS; `NVML` and `nvidia-smi` elsewhere, Linux
+    /// included (since v0.2.15; the Windows list before). On macOS,
+    /// [`crate::gpu_processes`] and [`crate::gpu_process_listing`] also
+    /// return it when the caller's sandbox refuses `proc_listpids` and no
+    /// `sysctl` listing can stand in, for example when `KERN_PROC_ALL` is
+    /// refused, or is allowed while `KERN_PROC_PID`, which vouches for its
+    /// record size, is refused; the sandbox is then the cause, though the
+    /// message names the backends.
     #[cfg_attr(
         target_os = "macos",
         error(
@@ -101,9 +103,15 @@ pub enum HypomnesisError {
         )
     )]
     #[cfg_attr(
-        not(target_os = "macos"),
+        windows,
         error(
             "no GPU measurement source available (NVML, DXGI, PDH, and nvidia-smi all failed or are disabled)"
+        )
+    )]
+    #[cfg_attr(
+        not(any(target_os = "macos", windows)),
+        error(
+            "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"
         )
     )]
     NoGpuSource,
@@ -149,11 +157,18 @@ mod tests {
     #[test]
     fn no_gpu_source_display_names_the_backends_of_the_platform() {
         let text = HypomnesisError::NoGpuSource.to_string();
-        // Windows and Linux keep the v0.2.13 text byte for byte.
-        #[cfg(not(target_os = "macos"))]
+        // Windows keeps the v0.2.13 text byte for byte.
+        #[cfg(windows)]
         assert_eq!(
             text,
             "no GPU measurement source available (NVML, DXGI, PDH, and nvidia-smi all failed or are disabled)"
+        );
+        // Linux, and any other platform, names only the two backends it
+        // compiles, none of the Windows-only ones.
+        #[cfg(not(any(target_os = "macos", windows)))]
+        assert_eq!(
+            text,
+            "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"
         );
         // macOS names Metal and none of the Windows-only backends.
         #[cfg(target_os = "macos")]

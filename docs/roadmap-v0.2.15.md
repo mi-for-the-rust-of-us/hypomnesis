@@ -167,7 +167,7 @@ says so (item 12).
 | 2 | The `GpuQuerySource::Pdh` link resolves under every feature set | docs | ✅ |
 | 3 | CI doc legs: three targets × all / no default features | build | ✅ |
 | 4 | A fake NVML stand-in for Linux CI | test only | ✅ |
-| 5 | `NoGpuSource` names only the backends of the platform (finding 5) | fix | ⬜ |
+| 5 | `NoGpuSource` names only the backends of the platform (finding 5) | fix | ✅ |
 | 6 | `hmn ps` GPU column (note 3) | feature | ⬜ |
 | 7 | `hmn ps` says there is no GPU to list (note 6) | feature | ⬜ |
 | 8 | `hmn` states skipped devices, exits `2` when it can tell nothing (note 5) | **fix** | ⬜ |

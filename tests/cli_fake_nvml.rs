@@ -147,10 +147,47 @@ impl Drop for FakeNvml {
     }
 }
 
+/// A real process for the fake to list: `sleep 30`, whose name `hmn` reads
+/// from `/proc` as for any GPU process; killed and reaped on drop.
+struct Sleeper(std::process::Child);
+
+impl Sleeper {
+    /// Start the process.
+    #[allow(clippy::expect_used)] // test-only
+    fn start() -> Self {
+        Self(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("failed to start sleep"),
+        )
+    }
+
+    /// Its PID, as `FAKE_NVML_PROCS` and `hmn`'s rows write it.
+    fn pid(&self) -> String {
+        self.0.id().to_string()
+    }
+}
+
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Whether `stderr` holds `line` as a whole line: a line, not the whole of
 /// stderr, since `debug-output` builds trace there too.
 fn has_line(stderr: &str, line: &str) -> bool {
     stderr.lines().any(|l| l == line)
+}
+
+/// The table rows of `stdout` whose first column is `pid`.
+fn rows_of<'a>(stdout: &'a str, pid: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some(pid))
+        .collect()
 }
 
 /// `hmn ps` exits `2` with the reason and nothing on stdout, `--json`
@@ -254,6 +291,42 @@ fn per_device_commands_name_the_reason_when_nvml_cannot_start() {
             run.stderr
         );
     }
+}
+
+/// A lost device is skipped with a line naming only the backends Linux
+/// has, where v0.2.14 named DXGI and PDH, and the device that answers is
+/// listed: the job on device 0 shows, and `hmn ps` exits `0`.
+#[test]
+fn ps_skips_a_lost_device_naming_the_linux_backends() {
+    let Some(fake) = FakeNvml::build("ps-lost") else {
+        return;
+    };
+    let job = Sleeper::start();
+    let procs = format!("0:{}:1073741824", job.pid());
+    let run = fake.hmn(
+        &["ps"],
+        &[
+            ("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,lost"),
+            ("FAKE_NVML_PROCS", &procs),
+        ],
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: ps failed to query device 1: no GPU measurement source available (NVML and \
+             nvidia-smi both failed or are disabled) (skipped)"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+    let rows = rows_of(&run.stdout, &job.pid());
+    assert_eq!(rows.len(), 1, "stdout: {}", run.stdout);
+    assert!(
+        rows.iter().all(|row| row.contains("sleep")),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 /// The control: a fake that works reads as a GPU, every figure from the

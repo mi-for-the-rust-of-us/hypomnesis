@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`NoGpuSource` names only the backends the platform has** (`src/error.rs`) — on Linux, and
+  any platform other than Windows and macOS, its text reads `no GPU measurement source available
+  (NVML and nvidia-smi both failed or are disabled)`, where it named DXGI and PDH, which exist only
+  on Windows: a lost GPU's skip line on a Linux node read as though Windows backends had been tried.
+  Windows keeps its text byte for byte, and macOS keeps the list v0.2.14 gave it. Matching on the
+  variant is unaffected. From the review of the v0.2.14 Linux field check
+  ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 5; item 5
+  of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
+
 ### Fixed
 
 - **An NVIDIA driver that is installed but fails to start no longer reads as "no GPU"**
