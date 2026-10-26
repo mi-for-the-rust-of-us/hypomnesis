@@ -256,6 +256,7 @@ A one-line summary is written to **stderr** after each `hmn ps` run:
 hmn: 2 GPU processes found (9.6 GiB committed total).
 hmn: 0 GPU processes found matching pid=99 device=0.   # with filters
 hmn: 1 GPU process found matching filter="canvas" (14.2 GiB committed total); device 0 spilling: 154 MiB free, 2.1 GiB shared, 1 process paged.
+hmn: 0 GPU processes found (no GPU to list).   # no NVIDIA driver, or a job given no GPU (since v0.2.15)
 ```
 
 The stderr summary is printed even when the table is empty (except when every device failed, which prints no table and exits `2`), so interactive users get an unambiguous "command worked, here's the count" line without breaking stdout's scriptability. Pipelines like `hmn ps | awk 'NR>1 {print $1}'` or `hmn ps --json | jq` work as expected. Redirect `2>/dev/null` to suppress the summary.

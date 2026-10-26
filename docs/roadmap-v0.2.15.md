@@ -169,7 +169,7 @@ says so (item 12).
 | 4 | A fake NVML stand-in for Linux CI | test only | ✅ |
 | 5 | `NoGpuSource` names only the backends of the platform (finding 5) | fix | ✅ |
 | 6 | `hmn ps` GPU column (note 3) | feature | ✅ |
-| 7 | `hmn ps` says there is no GPU to list (note 6) | feature | ⬜ |
+| 7 | `hmn ps` says there is no GPU to list (note 6) | feature | ✅ |
 | 8 | `hmn` states skipped devices, exits `2` when it can tell nothing (note 5) | **fix** | ⬜ |
 | 9 | `process_name`; `hmn watch` names PIDs the listing lacks (note 2) | **fix** | ⬜ |
 | 10 | `hmn watch` says which device holds the work (note 1) | feature | ⬜ |

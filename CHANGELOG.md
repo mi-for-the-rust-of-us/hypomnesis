@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GPU N`, which would repeat the new column. `--json` already carried `device_index` and is
   unchanged. The README transcripts are re-captured. Issue #4, note 3; item 6.
 
+- **`hmn ps` says when there is no GPU to list** (`src/bin/hmn/ps.rs`, `main.rs`) — with no
+  `--device` and no device to try (NVML counted zero, as in a Slurm job given no GPU, or no NVIDIA
+  driver is installed), the summary reads `0 GPU processes found (no GPU to list).`, where
+  `0 GPU processes found.` alone read as an idle GPU; `hmn` already said `no visible GPUs.` there.
+  The words differ from `hmn`'s because on a Windows PC whose only GPU is an iGPU, `hmn` lists it
+  through `DXGI` while `hmn ps` has no NVIDIA device to query. Exit codes are unchanged: `0`, and
+  `1` under `--exit-status`, since such a job is not on a GPU. Issue #4, note 6; item 7.
+
 ### Fixed
 
 - **An NVIDIA driver that is installed but fails to start no longer reads as "no GPU"**

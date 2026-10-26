@@ -280,7 +280,8 @@ enum Commands {
         /// unreadable a process the filters could match, since `1` means
         /// nothing matched on every device queried and no process the
         /// filters could match was unreadable. A machine with no NVIDIA
-        /// driver at all has no device to query, and exits `1`.
+        /// driver at all, or a job given no GPU, has no device to query:
+        /// the summary says `(no GPU to list)`, and the exit is `1`.
         #[arg(long)]
         exit_status: bool,
     },

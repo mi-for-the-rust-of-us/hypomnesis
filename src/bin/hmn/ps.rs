@@ -184,6 +184,11 @@ pub struct SummaryNotes {
     /// that `--pid` leaves relevant ([`PsFilters::relevant_denied`]), summed
     /// over the devices listed. Always `0` off macOS.
     pub unreadable: usize,
+    /// No `--device` was given and there was no device to list:
+    /// `device_count` counted zero (a job given no GPU) or found no count
+    /// source (no NVIDIA driver). The summary says so, since
+    /// `0 GPU processes found` alone would read as an idle GPU.
+    pub no_devices: bool,
 }
 
 /// Build the row comparator for a given [`SortKey`], shared by `hmn ps`
@@ -486,9 +491,13 @@ pub fn run_ps(filters: &PsFilters, sort: SortKey, json: bool, exit_status: bool)
     };
 
     let mut rows: Vec<PsRow> = Vec::new();
-    // Processes `--filter` could not judge (no resolvable name), and the
-    // spilling devices — what the summary line reports beyond the rows.
-    let mut notes = SummaryNotes::default();
+    // Processes `--filter` could not judge (no resolvable name), the
+    // spilling devices, and whether there was any device to list — what the
+    // summary line reports beyond the rows.
+    let mut notes = SummaryNotes {
+        no_devices: filters.device.is_none() && device_indices.is_empty(),
+        ..SummaryNotes::default()
+    };
     // Devices whose query was attempted, and the ones that failed: every
     // tried device failing is an exit `2`, not an empty listing.
     let mut tried: usize = 0;
@@ -643,10 +652,11 @@ pub fn remedy_clause(protected: usize, unreadable: usize, outside_sandbox: bool)
 
 /// Build the stderr summary string for `hmn ps`. Format:
 /// `<N> GPU process[es] found[ matching <filters>][ (<parts>)][; device <D> spilling: [<F> free, ]<S> shared, <P> process[es] paged]….`,
-/// where `<parts>` joins, with `; `, whichever of `<X.Y> <unit> committed
-/// total`, the remedy clause (`<U> unreadable` and `<M> protected`, joined
-/// by `, `, then ` — <remedy>`; see [`remedy_clause`]) and `<K> unnamed not
-/// matched` apply, where `<remedy>` is `re-run elevated for names`
+/// where `<parts>` joins, with `; `, whichever of `no GPU to list`,
+/// `<X.Y> <unit> committed total`, the remedy clause (`<U> unreadable` and
+/// `<M> protected`, joined by `, `, then ` — <remedy>`; see
+/// [`remedy_clause`]) and `<K> unnamed not matched` apply, where `<remedy>`
+/// is `re-run elevated for names`
 /// (Windows, Linux) or `re-run outside the sandbox` (macOS,
 /// `outside_sandbox == true`), as [`with_remedy`] words it.
 ///
@@ -669,6 +679,13 @@ pub fn remedy_clause(protected: usize, unreadable: usize, outside_sandbox: bool)
 ///   reading as broken when a Windows user sees, say, 32 `GiB`
 ///   committed on a 16 `GiB` card. Elided entirely when `count == 0`
 ///   because a zero-bytes total carries no information.
+///
+///   It opens with **`no GPU to list`** when `notes.no_devices` is set
+///   (since v0.2.15): with no `--device` and no device to try, the count
+///   is zero because there is no GPU to list, not because the GPUs are
+///   idle. The words are not `no visible GPUs`, which `hmn` would
+///   contradict on a Windows PC whose only GPU is an iGPU it lists through
+///   `DXGI`.
 ///
 ///   The parenthetical carries an **unreadable count**
 ///   (`; U unreadable — re-run outside the sandbox`) when `notes.unreadable`
@@ -768,6 +785,10 @@ fn format_ps_summary_with(
     // as broken. The total is elided when `count == 0` because "0 MiB
     // committed total" carries no information; `protected` is then 0 too.
     let mut parts: Vec<String> = Vec::new();
+    if notes.no_devices {
+        // BORROW: explicit to_owned — `parts` holds owned strings.
+        parts.push("no GPU to list".to_owned());
+    }
     if count > 0 {
         parts.push(format!("{} committed total", format_vram(committed_total)));
     }
@@ -1642,6 +1663,28 @@ mod tests {
         assert_eq!(
             format_ps_summary(&unprotected_rows(1), &f, &SummaryNotes::default()),
             "1 GPU process found matching min=1 GiB filter=\"canvas\",\"a b\" (0 MiB committed total)."
+        );
+    }
+
+    #[test]
+    fn format_ps_summary_says_there_is_no_gpu_to_list() {
+        // Issue #4, note 6: in a job given no GPU, `0 GPU processes found`
+        // alone read as an idle GPU.
+        let notes = SummaryNotes {
+            no_devices: true,
+            ..SummaryNotes::default()
+        };
+        assert_eq!(
+            format_ps_summary(&unprotected_rows(0), &filters(&[], None, None), &notes),
+            "0 GPU processes found (no GPU to list)."
+        );
+        let f = PsFilters {
+            patterns: vec!["canvas".to_owned()],
+            ..PsFilters::default()
+        };
+        assert_eq!(
+            format_ps_summary(&unprotected_rows(0), &f, &notes),
+            "0 GPU processes found matching filter=\"canvas\" (no GPU to list)."
         );
     }
 

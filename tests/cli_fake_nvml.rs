@@ -377,6 +377,50 @@ fn ps_gpu_column_tells_two_gpus_of_one_model_apart() {
     }
 }
 
+/// With no device to list (a job given no GPU: NVML starts and counts
+/// zero), the summary says so, where v0.2.14 printed only `0 GPU processes
+/// found.` (issue #4, note 6). The exit codes stay: `0`, `1` under
+/// `--exit-status`, and `2` for a `--device` past the count.
+#[test]
+fn ps_says_there_is_no_gpu_to_list() {
+    let Some(fake) = FakeNvml::build("ps-no-gpu") else {
+        return;
+    };
+    let run = fake.hmn(&["ps"], &[]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout.split_whitespace().collect::<Vec<_>>(),
+        ["PID", "NAME", "VRAM", "SHARED", "GPU", "DEVICE", "SPILL"]
+    );
+    assert!(
+        has_line(&run.stderr, "hmn: 0 GPU processes found (no GPU to list)."),
+        "stderr: {}",
+        run.stderr
+    );
+
+    let run = fake.hmn(&["ps", "--filter", "fieldcheck", "--exit-status"], &[]);
+    assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: 0 GPU processes found matching filter=\"fieldcheck\" (no GPU to list)."
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+
+    let run = fake.hmn(&["ps", "--device", "0"], &[]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: ps failed to query device 0: device index 0 out of range (have 0 devices)"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
 /// The control: a fake that works reads as a GPU, every figure from the
 /// fake's constants (16 GiB, 512 MiB reserved, driver `999.99`), so the
 /// tests above fail for the reason they name and not because the fake
