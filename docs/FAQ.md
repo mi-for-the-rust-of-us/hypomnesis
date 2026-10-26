@@ -341,7 +341,7 @@ negative answer, and only `hmn ps --exit-status` gives it.
 
 | Command | `0` | `1` | `2` |
 |---|---|---|---|
-| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`); nothing on stdout, `--json` included |
+| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, one whose kernel driver is not loaded, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`); nothing on stdout, `--json` included |
 | `hmn ps` | the listing, even empty, devices that failed skipped | with `--exit-status` only: nothing listed, every device tried answered, and no process the filters could match was unreadable — including `(no GPU to list)` | a `--device` that cannot be listed; every device failed; the devices could not be counted; with `--exit-status`, nothing listed and a device was skipped or a process the filters could match was unreadable |
 | `hmn watch` | no spill observed | spill observed | the watched device could not be listed, nothing to auto-select, or an invalid flag combination |
 
@@ -362,7 +362,12 @@ typically `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`
 after a driver upgrade without a reboot; `nvidia-smi` fails the same way
 there (`Failed to initialize NVML: Driver/library version mismatch`). Until
 v0.2.15 that read as a machine without GPUs: `hmn ps` printed
-`0 GPU processes found.`, and `--exit-status` exited `1`.
+`0 GPU processes found.`, and `--exit-status` exited `1`. The line is drawn
+by whether GPU processes could exist that `hmn` cannot see: the old kernel
+driver keeps running jobs after a version mismatch, so that is "can't tell";
+a kernel driver that is not loaded, or one that found no GPU, leaves no
+process on a GPU, so `hmn` reads those as no GPU (`no visible GPUs.`, exit
+`0`), as on a machine without an NVIDIA driver.
 
 ## On a multi-GPU node, or in a Slurm job, which GPU is `--device N`?
 

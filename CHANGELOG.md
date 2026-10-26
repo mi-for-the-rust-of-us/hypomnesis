@@ -92,8 +92,13 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   an empty `Vec` still means no count source installed, or one that counts zero). `device_info`,
   `process_gpu_info`, `gpu_processes` and `gpu_process_listing` return it instead of
   `NoGpuSource` when every backend failed, so `hmn ps --device N`, `hmn watch` and `hmn fits` name
-  the cause; `Snapshot::now`, which maps failures to `None`, is unchanged. A machine with no NVIDIA
-  driver behaves as before. `tests/cli_fake_nvml.rs` pins these outcomes on every Linux host, CI
+  the cause; `Snapshot::now`, which maps failures to `None`, is unchanged. The line is drawn by
+  whether GPU processes could exist that no backend can show, so a machine with no NVIDIA driver
+  behaves as before, and so does one whose kernel driver is not loaded
+  (`NVML_ERROR_DRIVER_NOT_LOADED`) or found no GPU (`NVML_ERROR_GPU_NOT_FOUND`), such as a CPU
+  instance on a GPU image: no process can be on a GPU there, so these read as no GPU, not as
+  "can't tell". On Windows a `DXGI` count of zero no longer stands in for a broken `NVML`, since
+  `DXGI` does not see a `TCC`-mode datacenter GPU. `tests/cli_fake_nvml.rs` pins these outcomes on every Linux host, CI
   included: it builds `tests/fixtures/nvml_fake.c`, a fake `libnvidia-ml.so.1` that answers the
   nine NVML calls the crate makes from environment variables (devices, lost devices, process rows,
   and the init and count return codes; here `nvmlInit_v2` returns 18), loads it through

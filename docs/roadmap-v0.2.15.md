@@ -89,7 +89,9 @@ says so (item 12).
   `43bd592`). `NvmlSession::start` (`src/gpu/nvml.rs`) tells a library that does not load from one
   that loads and cannot start; the detail names the call and the code from `nvml.h`:
   `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`. A machine without an NVIDIA
-  driver behaves as before. `Snapshot::now` keeps mapping failures to `None`.
+  driver behaves as before. `Snapshot::now` keeps mapping failures to `None`. The audit after the
+  last item refined the line (see *Decisions taken*): two init codes mean no GPU, and on Windows a
+  `DXGI` zero no longer hides a broken `NVML`.
 - **Link a target that is always compiled by its crate path** (item 2). The link to
   `GpuQuerySource::Pdh` in `gpu_processes`'s docs (`src/gpu/mod.rs:392`) resolves only through a
   `use` that is compiled when a backend feature is on, so any `--no-default-features` doc build
@@ -236,6 +238,20 @@ Taken while implementing:
 - **The fake replaces `nvml_broken.c` rather than sitting beside it.** The file is renamed, but
   the rewrite leaves too little in common for git to follow the rename: history is under the old
   name.
+
+Raised by the audit after the last item, decided by the maintainer on 2026-10-26: the line between
+"no GPU" and "can't tell" is whether GPU processes could exist that no backend can show.
+
+- **Two `nvmlInit_v2` codes mean no GPU.** `NVML_ERROR_DRIVER_NOT_LOADED` (9) reads as no usable
+  `NVML`, like a library that does not load, and `NVML_ERROR_GPU_NOT_FOUND` (28) as a count of
+  zero: no process can be on a GPU there. Every other code, unknown ones included, stays "can't
+  tell". Before this, a CPU cloud instance on a GPU image, or a node whose module Secure Boot
+  refused, made `hmn` exit `2`. The reason a driver is not loaded is lost from `hmn`'s output
+  (`NoGpuSource` is a unit variant); `debug-output` builds still print it.
+- **On Windows, a `DXGI` count of zero no longer stands in for a broken `NVML`.** `DXGI` sees only
+  `WDDM` adapters, so a datacenter GPU in `TCC` mode is invisible to it, and a broken `NVML` over
+  it read as "no GPU" while its jobs ran. A positive `DXGI` count still answers. A machine with one
+  `WDDM` and one `TCC` GPU, where `DXGI` counts one, is left as it was.
 
 ---
 

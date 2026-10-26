@@ -40,15 +40,18 @@ pub enum HypomnesisError {
     Ram(String),
 
     /// The `NVML` library loaded but could not start or count, and no
-    /// other backend answered (since v0.2.15): `nvmlInit_v2`,
-    /// `nvmlShutdown` or `nvmlDeviceGetCount_v2` is missing, or
-    /// `nvmlInit_v2` or `nvmlDeviceGetCount_v2` returned an error. The
+    /// other backend reported a positive count (since v0.2.15):
+    /// `nvmlInit_v2`, `nvmlShutdown` or `nvmlDeviceGetCount_v2` is missing,
+    /// or `nvmlInit_v2` or `nvmlDeviceGetCount_v2` returned an error. The
     /// text names the call and the return code, for example
     /// `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`
-    /// after a driver upgrade without a reboot. Unlike
-    /// [`Self::NoGpuSource`], it does not mean "no GPU here": the GPUs may
-    /// be there, unreadable. An `NVML` library that does not load at all
-    /// is not this error but `NoGpuSource`.
+    /// after a driver upgrade without a reboot, or the symbol that failed
+    /// to resolve. Unlike [`Self::NoGpuSource`], it does not mean "no GPU
+    /// here": the GPUs may be there, unreadable. Not this error but
+    /// `NoGpuSource` (or a count of zero): an `NVML` library that does not
+    /// load at all, and an `nvmlInit_v2` that says the kernel driver is
+    /// not loaded (`NVML_ERROR_DRIVER_NOT_LOADED`) or found no GPU
+    /// (`NVML_ERROR_GPU_NOT_FOUND`), since no GPU process can exist then.
     #[error("NVML error: {0}")]
     Nvml(String),
 

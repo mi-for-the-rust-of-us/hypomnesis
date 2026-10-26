@@ -250,6 +250,61 @@ fn ps_exits_2_with_the_reason_when_nvml_cannot_start() {
     }
 }
 
+/// A driver that is not loaded (`nvmlInit_v2` returns
+/// `NVML_ERROR_DRIVER_NOT_LOADED`, 9) or that found no GPU
+/// (`NVML_ERROR_GPU_NOT_FOUND`, 28) leaves no GPU process that could
+/// exist: both read as no GPU, not as "can't tell" the way a version
+/// mismatch does. `hmn` says `no visible GPUs.` (exit `0`) and `hmn ps`
+/// says `(no GPU to list)` (exit `0`, `1` under `--exit-status`), as on a
+/// machine without an NVIDIA driver; a host with NVIDIA userspace but no
+/// usable GPU (a CPU cloud instance on a GPU image) must not exit `2`.
+#[test]
+fn nvml_codes_that_mean_no_gpu_read_as_no_gpu() {
+    let Some(fake) = FakeNvml::build("init-no-gpu") else {
+        return;
+    };
+    for code in ["9", "28"] {
+        let env = [("FAKE_NVML_INIT", code)];
+        let run = fake.hmn(&[], &env);
+        assert_eq!(run.code, Some(0), "code {code}: stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "hmn: no visible GPUs.\n", "code {code}");
+
+        let run = fake.hmn(&["ps"], &env);
+        assert_eq!(run.code, Some(0), "code {code}: stderr: {}", run.stderr);
+        assert!(
+            has_line(&run.stderr, "hmn: 0 GPU processes found (no GPU to list)."),
+            "code {code}: stderr: {}",
+            run.stderr
+        );
+
+        let run = fake.hmn(&["ps", "--exit-status"], &env);
+        assert_eq!(run.code, Some(1), "code {code}: stderr: {}", run.stderr);
+    }
+    // `--device 0`: a driver that found no GPU counts zero, so the index
+    // is out of range; one that is not loaded leaves no count source.
+    let run = fake.hmn(&["ps", "--device", "0"], &[("FAKE_NVML_INIT", "28")]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: ps failed to query device 0: device index 0 out of range (have 0 devices)"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+    let run = fake.hmn(&["ps", "--device", "0"], &[("FAKE_NVML_INIT", "9")]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: ps failed to query device 0: no GPU measurement source available (NVML and \
+             nvidia-smi both failed or are disabled)"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
 /// A count call that fails after a good init is reported the same way,
 /// naming that call: the `nvmlDeviceGetCount_v2` path of `device_count`.
 #[test]

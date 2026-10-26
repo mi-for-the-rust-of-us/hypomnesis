@@ -59,33 +59,42 @@ mod kinfo;
 /// `DXGI` fallback counts NVIDIA adapters with non-zero dedicated `VRAM`.
 ///
 /// The two errors draw the line between "no GPU here" and "can't tell"
-/// (since v0.2.15). [`HypomnesisError::NoGpuSource`] means no count source
-/// is installed — no `NVML` library to load, as on a machine without an
-/// NVIDIA driver — so a caller may read it as zero GPUs, and `hmn ps` and
-/// [`crate::Snapshot::all`] do. [`HypomnesisError::Nvml`] means the `NVML`
-/// library loaded but could not start or count (for example
-/// `nvmlInit_v2` returned `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a
-/// driver upgrade without a reboot), so the GPUs may be there, unreadable;
-/// reading it as zero GPUs would report a broken driver as an idle machine.
+/// (since v0.2.15), by whether GPU processes could exist that no backend
+/// can show. [`HypomnesisError::NoGpuSource`] means no usable count source
+/// — no `NVML` library to load, as on a machine without an NVIDIA driver,
+/// or one whose kernel driver is not loaded (`nvmlInit_v2` returns
+/// `NVML_ERROR_DRIVER_NOT_LOADED`), where no process can be on a GPU — so
+/// a caller may read it as zero GPUs, and `hmn ps` and
+/// [`crate::Snapshot::all`] do. A driver that found no GPU
+/// (`NVML_ERROR_GPU_NOT_FOUND`) is a count of zero. [`HypomnesisError::Nvml`]
+/// means the `NVML` library loaded but could not start or count for any
+/// other reason (for example `nvmlInit_v2` returned
+/// `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a driver upgrade without a
+/// reboot, while the old kernel driver keeps running jobs), so the GPUs
+/// may be there, unreadable; reading it as zero GPUs would report a broken
+/// driver as an idle machine. On Windows a `DXGI` count of zero does not
+/// override a broken `NVML`: `DXGI` does not see a `TCC`-mode GPU.
 ///
 /// # Errors
 ///
 /// Returns [`HypomnesisError::NoGpuSource`] if no enumeration backend
 /// is enabled, or if no enabled backend reported a count and `NVML` is
-/// not installed.
+/// not installed or its kernel driver is not loaded.
 /// Returns [`HypomnesisError::Nvml`] if no enabled backend reported a
-/// count and the `NVML` library loaded but could not start or count.
+/// positive count and the `NVML` library loaded but could not start or
+/// count.
 pub fn device_count() -> Result<u32> {
     backend_count().map_err(no_count_error)
 }
 
 /// The first device count a backend reports, in [`device_count`]'s
-/// priority order (Metal on macOS, then `NVML`, then `DXGI` on Windows),
+/// priority order (`Metal` on macOS, then `NVML`, then `DXGI` on Windows),
 /// or, when none does, `NVML`'s failure detail if its library loaded but
 /// could not start or count (`None` when `NVML` is absent or not
 /// compiled in). [`device_count`] and [`bounds_check`] both walk the
 /// backends through here, so the bound an index is checked against is the
-/// count `hmn` shows.
+/// count `hmn` shows. A `DXGI` count of zero does not stand in for a broken
+/// `NVML` ([`dxgi_count_stands`]).
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
 fn backend_count() -> std::result::Result<u32, Option<String>> {
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -103,7 +112,9 @@ fn backend_count() -> std::result::Result<u32, Option<String>> {
     let nvml_failure: Option<String> = None;
 
     #[cfg(all(windows, feature = "dxgi"))]
-    if let Some(count) = dxgi::device_count() {
+    if let Some(count) = dxgi::device_count()
+        && dxgi_count_stands(count, nvml_failure.is_some())
+    {
         return Ok(count);
     }
 
@@ -112,6 +123,20 @@ fn backend_count() -> std::result::Result<u32, Option<String>> {
     // adds a subprocess invocation for what's typically a metadata call.
 
     Err(nvml_failure)
+}
+
+/// Whether a `DXGI` count of NVIDIA adapters may answer for the device
+/// count when `NVML` did not: always, unless `NVML` is broken (installed
+/// but unable to start or count) and `DXGI` counts zero. `DXGI` sees only
+/// `WDDM` adapters, so its zero does not prove there is no NVIDIA GPU: a
+/// datacenter GPU in `TCC` mode is invisible to it, and a broken `NVML`
+/// over such a GPU may hide running jobs. The broken `NVML`'s error stands
+/// then ("can't tell"), not a count of zero ("no GPU"); a card in an error
+/// state (Code 43, disabled) gets the same, which says it is in trouble.
+#[cfg(any(all(windows, feature = "dxgi"), test))]
+#[must_use]
+const fn dxgi_count_stands(count: u32, nvml_broken: bool) -> bool {
+    count > 0 || !nvml_broken
 }
 
 /// The error for "no backend reported a count": [`HypomnesisError::Nvml`]
@@ -970,6 +995,17 @@ mod tests {
         assert!(
             matches!(no_count_error(Some(detail.to_owned())), HypomnesisError::Nvml(ref s) if s == detail)
         );
+    }
+
+    #[test]
+    fn dxgi_count_stands_unless_it_is_zero_over_a_broken_nvml() {
+        // NVML absent (no NVIDIA driver): DXGI's count answers, zero too.
+        assert!(dxgi_count_stands(0, false));
+        assert!(dxgi_count_stands(2, false));
+        // NVML broken: a positive DXGI count still answers, but its zero
+        // does not (a TCC-mode GPU is invisible to DXGI).
+        assert!(dxgi_count_stands(1, true));
+        assert!(!dxgi_count_stands(0, true));
     }
 
     #[test]

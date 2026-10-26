@@ -130,25 +130,70 @@ fn call_failure(call: &str, code: u32) -> String {
     format!("{call} returned {name} ({code})")
 }
 
+/// What a failed `nvmlInit_v2` says about the GPUs, read from its return
+/// code by [`classify_init_failure`]. The question is whether GPU processes
+/// could exist that `NVML` cannot show: if not, the answer is "no GPU", and
+/// `hmn ps --exit-status` may say "not on the GPU"; if so, "can't tell".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitFailure {
+    /// `NVML_ERROR_GPU_NOT_FOUND`: the driver runs and found no GPU, so
+    /// there are zero GPUs.
+    NoGpu,
+    /// `NVML_ERROR_DRIVER_NOT_LOADED`: the kernel driver is not running
+    /// (no GPU, a module Secure Boot refused, one not rebuilt after a
+    /// kernel update), so no process can be on its GPUs; read as no
+    /// usable `NVML`, like a library that does not load.
+    NoDriver,
+    /// Any other code: GPU processes may exist that `NVML` cannot show,
+    /// as after a driver upgrade without a reboot
+    /// (`NVML_ERROR_LIB_RM_VERSION_MISMATCH`: the old kernel driver keeps
+    /// running jobs), a driver the caller may not talk to
+    /// (`NVML_ERROR_NO_PERMISSION`) or a lost GPU. Can't tell.
+    CannotTell,
+}
+
+/// The [`InitFailure`] an `nvmlInit_v2` return `code` means: two codes say
+/// no GPU process can exist, and every other one, unknown codes included,
+/// is "can't tell", the safe answer.
+#[must_use]
+const fn classify_init_failure(code: u32) -> InitFailure {
+    match code {
+        NVML_ERROR_GPU_NOT_FOUND => InitFailure::NoGpu,
+        NVML_ERROR_DRIVER_NOT_LOADED => InitFailure::NoDriver,
+        _ => InitFailure::CannotTell,
+    }
+}
+
+/// `NVML` return code: the driver found no GPU.
+const NVML_ERROR_GPU_NOT_FOUND: u32 = 28;
+
+/// `NVML` return code: the kernel driver is not loaded.
+const NVML_ERROR_DRIVER_NOT_LOADED: u32 = 9;
+
 /// Why [`NvmlSession::start`] gave no session.
 enum StartFailure {
-    /// The `NVML` library did not load: no NVIDIA driver is installed
-    /// here, so there is no GPU for `NVML` to report.
+    /// No usable `NVML`: the library did not load (no NVIDIA driver here,
+    /// or one whose library cannot be loaded), or `nvmlInit_v2` said the
+    /// kernel driver is not loaded ([`InitFailure::NoDriver`]). Either way
+    /// no GPU process can be measured, nor exist, through it.
     Absent,
-    /// The library loaded but could not start: `nvmlInit_v2` or
-    /// `nvmlShutdown` is missing, or `nvmlInit_v2` returned an error (a
-    /// driver/library version mismatch after a driver upgrade without a
-    /// reboot, a driver that is not loaded). The GPUs may be there,
-    /// unreadable. Holds the detail ([`call_failure`]).
+    /// `nvmlInit_v2` said the driver found no GPU ([`InitFailure::NoGpu`]).
+    NoGpus,
+    /// The library loaded but could not start, and GPUs may be there,
+    /// unreadable: `nvmlInit_v2` or `nvmlShutdown` is missing, or
+    /// `nvmlInit_v2` returned a [`InitFailure::CannotTell`] code. Holds
+    /// the detail: the call and its return code ([`call_failure`]), or
+    /// the symbol that failed to resolve.
     Broken(String),
 }
 
-/// What [`device_count`] found: a count, no `NVML` library, or a library
+/// What [`device_count`] found: a count, no usable `NVML`, or a library
 /// that loaded but could not start or count.
 pub(super) enum NvmlCount {
-    /// `nvmlDeviceGetCount_v2` answered.
+    /// `nvmlDeviceGetCount_v2` answered, or `nvmlInit_v2` said the driver
+    /// found no GPU (a count of zero).
     Counted(u32),
-    /// The library did not load ([`StartFailure::Absent`]).
+    /// No usable `NVML` ([`StartFailure::Absent`]).
     Absent,
     /// The library loaded but could not start or count; holds the detail
     /// that becomes [`crate::HypomnesisError::Nvml`]'s text.
@@ -355,7 +400,11 @@ impl NvmlSession {
             // EXPLICIT: caller is read only by the debug-output trace above.
             #[cfg(not(feature = "debug-output"))]
             let _ = caller;
-            return Err(StartFailure::Broken(call_failure("nvmlInit_v2", ret)));
+            return Err(match classify_init_failure(ret) {
+                InitFailure::NoGpu => StartFailure::NoGpus,
+                InitFailure::NoDriver => StartFailure::Absent,
+                InitFailure::CannotTell => StartFailure::Broken(call_failure("nvmlInit_v2", ret)),
+            });
         }
         Ok(Self { shutdown, lib })
     }
@@ -981,17 +1030,20 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
     Some(rows)
 }
 
-/// Number of NVIDIA GPUs visible to `NVML`: [`NvmlCount::Counted`], or why
-/// there is none — [`NvmlCount::Absent`] when the library does not load
-/// (no NVIDIA driver here), [`NvmlCount::Broken`] when it loads but
-/// cannot start, or `nvmlDeviceGetCount_v2` is missing or fails. Used by
-/// the public `device_count()` dispatcher and for bounds-checking an
-/// index in the other dispatchers.
+/// Number of NVIDIA GPUs visible to `NVML`: [`NvmlCount::Counted`] (zero
+/// when `nvmlInit_v2` says the driver found no GPU), or why there is none —
+/// [`NvmlCount::Absent`] when the library does not load or `nvmlInit_v2`
+/// says the kernel driver is not loaded (no GPU process can exist then),
+/// [`NvmlCount::Broken`] when it loads but cannot start for any other
+/// reason ([`classify_init_failure`]), or `nvmlDeviceGetCount_v2` is
+/// missing or fails. Used by the public `device_count()` dispatcher and
+/// for bounds-checking an index in the other dispatchers.
 #[allow(unsafe_code)]
 pub(super) fn device_count() -> NvmlCount {
     let session = match NvmlSession::start("device_count") {
         Ok(session) => session,
         Err(StartFailure::Absent) => return NvmlCount::Absent,
+        Err(StartFailure::NoGpus) => return NvmlCount::Counted(0),
         Err(StartFailure::Broken(detail)) => return NvmlCount::Broken(detail),
     };
 
@@ -1118,6 +1170,24 @@ mod return_code_tests {
         assert_eq!(return_code_name(NVML_SUCCESS), None);
         assert_eq!(return_code_name(31), None);
         assert_eq!(return_code_name(998), None);
+    }
+
+    #[test]
+    fn classify_init_failure_reads_no_gpu_only_where_no_process_can_exist() {
+        // The driver found no GPU, or is not loaded: no GPU process can
+        // exist, so "no GPU" is the true answer.
+        assert_eq!(classify_init_failure(28), InitFailure::NoGpu);
+        assert_eq!(classify_init_failure(9), InitFailure::NoDriver);
+        // A version mismatch (the old kernel driver keeps running jobs), a
+        // refused device node, a lost GPU, an unknown or future code: GPU
+        // processes may exist that NVML cannot show.
+        for code in [18, 4, 15, 999, 12, 31] {
+            assert_eq!(
+                classify_init_failure(code),
+                InitFailure::CannotTell,
+                "code {code}"
+            );
+        }
     }
 
     #[test]
