@@ -49,7 +49,7 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 5; item 5
   of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
-- **`hmn ps` shows which GPU each row is on** (`src/bin/hmn/ps.rs`) — the table gains a `GPU`
+- **`hmn ps` shows which GPU each row is on** (`src/bin/hmn/ps.rs`, `README.md`) — the table gains a `GPU`
   column, the device index, before DEVICE: `PID NAME VRAM SHARED GPU DEVICE SPILL`. On a node
   whose GPUs are all one model, DEVICE alone read the same on every row, and one process on two
   GPUs printed two identical rows. An unknown model name now reads `?` in DEVICE, where it read
@@ -60,7 +60,8 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   (`src/bin/hmn/watch.rs`) — on a GPU holding another user's process but nothing matching
   `--filter`, it said `found no GPU processes on device 0`, which read as nothing running. It now
   says `found 1 GPU process on device 0, none to auto-select (…)` (`none to follow yet` under
-  `--follow-new`); on a GPU with no process at all the line is unchanged. A process `--filter`
+  `--follow-new`); on a GPU with no process at all the opening is unchanged, and the whole line
+  too unless another GPU has a match, whose hint then replaces the re-run advice. A process `--filter`
   could not judge is now named before that line, where an empty selection ended the watch before
   it was. Issue #4, note 1; item 10.
 
@@ -78,9 +79,10 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   (`src/gpu/nvml.rs`, `src/gpu/mod.rs`, `src/snapshot.rs`, `src/error.rs`, `src/bin/hmn/ps.rs`,
   `summary.rs`, `main.rs`) — `device_count()` now tells the two apart. An `NVML` library that does
   not load (no NVIDIA driver here) is still `NoGpuSource`; one that loads but cannot start or
-  count (`nvmlInit_v2` or `nvmlDeviceGetCount_v2` missing or returning an error, for example
-  `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a driver upgrade without a reboot) is
-  `HypomnesisError::Nvml`, whose text names the call and the code:
+  count (`nvmlInit_v2`, `nvmlShutdown` or `nvmlDeviceGetCount_v2` missing, or `nvmlInit_v2` or
+  `nvmlDeviceGetCount_v2` returning an error, for example `NVML_ERROR_LIB_RM_VERSION_MISMATCH`
+  after a driver upgrade without a reboot) is `HypomnesisError::Nvml`, whose text names the call
+  and the code, or the symbol that failed to resolve:
   `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`. Before, both were
   `NoGpuSource`, and both read as zero GPUs. `hmn ps` printed `0 GPU processes found.` and
   `--exit-status` exited `1` ("not on the GPU") while the GPUs ran jobs; it now prints
@@ -104,7 +106,8 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   and the init and count return codes; here `nvmlInit_v2` returns 18), loads it through
   `LD_LIBRARY_PATH` with no `nvidia-smi` on `PATH`, and so touches no GPU; on CI a missing C
   compiler fails the tests instead of skipping them. From the review of the v0.2.14 Linux field check
-  ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6.
+  ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6; items 1
+  and 4 (the fake NVML) of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
 - **`hmn` states each device it skips, and exits `2` when it can read none** (`src/bin/hmn/summary.rs`,
   `main.rs`, `src/snapshot.rs`) — a GPU whose `device_info` failed was dropped from `hmn`'s list
@@ -116,7 +119,9 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   device, so `hmn` asks `device_info` again for it, which costs one call only where a device
   already failed; the `Snapshot::all` docs now state the order this relies on (the counted devices
   first, in index order). Every subcommand now returns its own exit code, so `main`'s `Ok`/`Err`
-  fold, whose generic `1` only `hmn` still used, is gone. Issue #4, note 5; item 8.
+  fold, whose generic `1` only `hmn` still used, is gone: any other failure of `hmn`'s query (a
+  `RAM` read, say) prints `hmn: <reason>` and exits `2`, where it exited `1`. Issue #4, note 5;
+  item 8.
 
 - **`hmn watch` names a watched PID the listing lacks** (`src/bin/hmn/watch.rs`, `main.rs`) — a
   watched PID absent from the watched device's listing (on another GPU, or holding no GPU memory,

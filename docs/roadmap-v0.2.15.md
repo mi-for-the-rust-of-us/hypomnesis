@@ -20,7 +20,8 @@ fields land in patch releases. Type-shape changes … are minor bumps, never pat
   `(no GPU to list)` on its summary line, stderr lines for the devices `hmn` skips, and notices
   from `hmn watch` that name the device holding the work.
 
-Five behaviour changes are deliberate. Each turns a silent wrong answer into a stated one:
+Six behaviour changes are deliberate. The first five each turn a silent wrong answer into a stated
+one, and the sixth follows from them:
 
 - an NVIDIA driver that is installed but fails to start (`nvmlInit_v2` returning
   `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a driver upgrade without a reboot) is
@@ -33,6 +34,8 @@ Five behaviour changes are deliberate. Each turns a silent wrong answer into a s
 - `hmn` states each device it skips, where v0.2.14 dropped it without a word and exited `0`;
 - the DEVICE cell of `hmn ps` reads `?` when the model name is unknown, where it read `GPU N`:
   the index has its own column now;
+- `hmn`'s other failures (a `RAM` read, say) exit `2` where they exited `1`: with every
+  subcommand returning its own exit code, `main`'s `Ok`/`Err` fold and its generic `1` went;
 - `hmn watch` names a watched PID that is alive but absent from the watched device's listing, where
   v0.2.14 printed `?`, which elsewhere means "the name could not be read".
 
@@ -99,6 +102,7 @@ says so (item 12).
   ``[`Pdh`](crate::GpuQuerySource::Pdh)``, under a label that does not resolve on its own, since
   ``[`GpuQuerySource::Pdh`](crate::GpuQuerySource::Pdh)`` trips rustdoc's
   `redundant_explicit_links` wherever the `use` is compiled. `CONVENTIONS.md` gains that rule.
+  (This is the form as implemented; the plan named that second form, see *Decisions taken*.)
 - **Cross-document from Ubuntu** (item 3). The doc job becomes a matrix over the three docs.rs
   targets × {`--all-features`, `--no-default-features`}, all on `ubuntu-latest`, as docs.rs builds
   them; no macOS runner minutes.
@@ -145,7 +149,8 @@ says so (item 12).
   at attach, and applies the same `Selection::select`:
   - with processes on the watched device but none matching:
     `hmn: watch found 1 GPU process on device 0, none to auto-select (top 5 among names containing "fieldcheck" (case-insensitive)); device 5 has a match (pid 2860458): re-run with --device 5`
-    (exit `2`); with none at all, the v0.2.14 line is unchanged;
+    (exit `2`); with none at all, the v0.2.14 opening is unchanged, and so is the whole line
+    unless another device has a match, whose hint replaces the re-run advice;
   - under `--follow-new`, the same opening ending `none to follow yet (…); waiting for work to
     appear`, and the hint on a line of its own;
   - an explicit PID found elsewhere:

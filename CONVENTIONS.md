@@ -22,7 +22,7 @@ sections are unique to hypomnesis.
 |---|---|
 | Write a `///` or `//!` comment | [Backtick hygiene](#backtick-hygiene), [field-level docs](#field-level-docs), [intra-doc link safety](#intra-doc-link-safety) |
 | Write a `pub fn` or `pub const fn` | [`const fn`](#const-fn), [`#[must_use]`](#must_use-policy), [pass by value](#pass-by-value-vs-reference) |
-| Write a `pub fn` returning `Result<T>` | [`# Errors` section](#errors-doc-section) |
+| Write a `pub fn` returning `Result<T>` | [`# Errors` section](#-errors-doc-section) |
 | Write a `pub enum` or `pub struct` | [`#[non_exhaustive]`](#non_exhaustive-policy) or [`// EXHAUSTIVE:`](#exhaustive-annotation) |
 | Write an `as` cast | [`// CAST:`](#cast-annotation) |
 | Write `slice[i]` or `slice[a..b]` | [`// INDEX:`](#index-annotation) |

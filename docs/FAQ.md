@@ -326,9 +326,11 @@ makes any Foundation program abort inside Apple's `libdispatch` before
 — on another GPU, or holding no GPU memory, like PID 1 — is named by a
 direct lookup (`hypomnesis::process_name`, since v0.2.15), so its NAME is
 the process's own: before v0.2.15 it read `?` though the name was readable.
-`?` there now means what it means everywhere else, an unresolved name, or a
-process that is gone; a PID that names no process also gets the attach
-warning `names no running process`. The lookup only names the row and the
+`?` there now means an unresolved name, or a process that is gone. On Windows
+the listing would write `[exited]` for a gone process, but the lookup writes
+no brackets, so a gone watched PID reads `?`. An explicit PID that names no
+process when `hmn watch` attaches also gets the warning
+`names no running process`. The lookup only names the row and the
 closing summary: a name it spells differently from the listing (the
 `nvidia-smi` fallback's) never resets the PID's baseline as a PID reuse
 would.
@@ -337,11 +339,13 @@ would.
 
 `2` means **could not tell**: `hmn` refuses to let a broken driver or an
 unreadable device read as an idle machine. `1` is reserved for a real
-negative answer, and only `hmn ps --exit-status` gives it.
+negative answer: of `hmn` and `hmn ps`, only `hmn ps --exit-status` gives
+it (`hmn watch` gives it for "spill observed", `hmn fits` for "does not
+fit").
 
 | Command | `0` | `1` | `2` |
 |---|---|---|---|
-| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, one whose kernel driver is not loaded, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`); nothing on stdout, `--json` included |
+| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, one whose kernel driver is not loaded, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`), or another query failed (`hmn: <reason>`, which exited `1` before v0.2.15); nothing on stdout, `--json` included |
 | `hmn ps` | the listing, even empty, devices that failed skipped | with `--exit-status` only: nothing listed, every device tried answered, and no process the filters could match was unreadable — including `(no GPU to list)` | a `--device` that cannot be listed; every device failed; the devices could not be counted; with `--exit-status`, nothing listed and a device was skipped or a process the filters could match was unreadable |
 | `hmn watch` | no spill observed | spill observed | the watched device could not be listed, nothing to auto-select, or an invalid flag combination |
 
@@ -355,7 +359,8 @@ index past the count, anything else for a device that failed (on Linux
 usually `no GPU measurement source available (NVML and nvidia-smi both failed
 or are disabled)`). For a log scan, look for the `failed to query device`
 prefix, then read the reason: the `(skipped)` suffix alone misses a fatal
-`--device` failure.
+`--device` failure. Look for `failed to count devices` too: that line, from
+either command, means no device could even be counted, and the exit is `2`.
 
 The GPUs cannot be counted when the NVIDIA library loads but cannot start,
 typically `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`
@@ -388,9 +393,12 @@ cannot be joined on `device_index`. A job given **no** GPU has no device to
 list: `hmn` prints `hmn: no visible GPUs.`, `hmn ps` prints
 `hmn: 0 GPU processes found (no GPU to list).` and exits `0` (`1` under
 `--exit-status`, since the job is not on a GPU), and `--device 0` exits `2`
-with `device index 0 out of range (have 0 devices)`. Measured on a 2× H100
-NVL node under Slurm in the
-[v0.2.14 Linux field check](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4).
+with `device index 0 out of range (have 0 devices)`. The renumbering, the
+count of zero and the out-of-range line were measured on a 2× H100 NVL node
+under Slurm in the
+[v0.2.14 Linux field check](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4);
+`(no GPU to list)` is v0.2.15's, where v0.2.14 printed only
+`0 GPU processes found.`.
 
 ## Why is there no `hmn kill` or `hmn spill --kill`?
 

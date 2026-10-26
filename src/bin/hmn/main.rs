@@ -199,8 +199,8 @@ struct Cli {
     /// `index` (number), `name` (string or null),
     /// `total_bytes`/`free_bytes`/`used_bytes` (numbers), `reserved_bytes`
     /// (number or null), `driver_version` (string or null). A device that
-    /// cannot be read has no object; when none can be read, nothing is
-    /// printed (not `[]`) and the exit is `2`.
+    /// cannot be read has no object; when none can be read, or the devices
+    /// cannot be counted, nothing is printed (not `[]`) and the exit is `2`.
     #[arg(long)]
     json: bool,
 }

@@ -357,7 +357,7 @@ the first sample, so a spill already under way at attach is not counted; since
 v0.2.13 `hmn watch` says so at attach, in its closing summary, and as
 `spilling_at_attach` in `--json` — `hmn ps` shows the current state. A watched PID absent from a
 sample renders `0 MiB` — `hmn watch` cannot distinguish "exited" from
-"currently holds no GPU memory" and does not auto-stop on this basis; use
+"currently holds no GPU memory" by its bytes, and does not auto-stop on this basis; use
 `--duration` or Ctrl+C. At attach, though, an explicit PID that names no
 running process at all — a typo — gets a one-line stderr warning (since
 v0.2.13: `hmn watch: pid=999999 names no running process; its rows will read
@@ -580,7 +580,7 @@ Two consequences worth noting:
 
 | Doc | |
 |-----|---|
-| [FAQ](docs/FAQ.md) | Common questions — commit vs resident, `hmn spill` vs `hmn watch`, the SHARED baseline, the spill condition and its 85% threshold, per-platform zeros, `?`/`[exited]`/`[protected]` rows and elevation, threading, polling cost, upgrading |
+| [FAQ](docs/FAQ.md) | Common questions — commit vs resident, `hmn spill` vs `hmn watch`, the SHARED baseline, the spill condition and its 85% threshold, per-platform zeros, `?`/`[exited]`/`[protected]` rows and elevation, exit codes and `(skipped)` devices, `--device N` on multi-GPU nodes and in Slurm jobs, threading, polling cost, upgrading |
 | [Tutorial: Is my run spilling?](docs/tutorials/is-my-run-spilling.md) | Walkthrough: wrap a run with `hmn spill`, read the episode pattern, attribute per-PID, wire `SpillTracker` into your own loop |
 | [Tutorial: Triage a job that's already running](docs/tutorials/watching-a-running-job.md) | Walkthrough: attach `hmn watch` to a running PID, read the live SPILL column, script the exit code — and `--follow-new` to stand guard over a machine through a suite of short-lived jobs |
 | [ROADMAP](ROADMAP.md) | Status snapshot: shipped, committed, speculative, and deliberately-rejected ideas |

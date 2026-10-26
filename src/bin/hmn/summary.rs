@@ -55,7 +55,9 @@ fn count_failure_line(err: &impl std::fmt::Display) -> String {
 ///   be read ([`format_none_readable_message`]) or the devices could not
 ///   be counted ([`count_failure_line`]: an NVIDIA driver that is
 ///   installed but fails to start, `Snapshot::all`'s
-///   `HypomnesisError::Nvml`). `1` is not used: `2` is `hmn ps`'s and
+///   `HypomnesisError::Nvml`), or `Snapshot::all` failed for another
+///   reason (a `RAM` read; `hmn: <reason>`, which exited `1` through
+///   `main`'s old `Ok`/`Err` fold). `1` is not used: `2` is `hmn ps`'s and
 ///   `hmn watch`'s "could not tell" too.
 pub fn run_summary(json: bool) -> ExitCode {
     let mut snaps = match Snapshot::all() {

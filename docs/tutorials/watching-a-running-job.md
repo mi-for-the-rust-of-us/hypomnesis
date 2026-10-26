@@ -277,9 +277,10 @@ hmn watch: per-PID  PID    NAME            BASELINE COMMIT  PEAK COMMIT  BASELIN
 taken a slot, and neither appears. The workload stayed under the saturation
 threshold, so no spill — the point here is what was recorded. Captured before
 v0.2.13, whose rows line up under the header and whose per-PID table adds a
-`PAGED` column. Since v0.2.15 the first line counts what device 0 did hold:
-`hmn: watch found 2 GPU processes on device 0, none to follow yet (…); waiting
-for work to appear`, and when another GPU has a match a second line says so,
+`PAGED` column. Since v0.2.15 the first line counts what device 0 did hold,
+every process `PDH` lists on Windows (24 on this machine when checked):
+`hmn: watch found 24 GPU processes on device 0, none to follow yet (…);
+waiting for work to appear`, and when another GPU has a match a second line says so,
 `hmn watch: device 1 has a match (pid …): re-run with --device 1`.)*
 
 What to notice:
@@ -355,9 +356,11 @@ is a hard error (exit `2`).
   distinguish "PID exited" from "PID alive but currently holds no GPU memory
   on this device" by its bytes — a watched PID simply renders zeroed that
   interval either way, and `hmn watch` does not auto-stop on this basis. Use
-  `--duration` or Ctrl+C to end the watch. Its NAME does tell (since
+  `--duration` or Ctrl+C to end the watch. Its NAME usually tells (since
   v0.2.15): a live process reads its own name, looked up directly, and one
-  that has exited reads `?`.
+  that has exited, or whose name is unreadable, reads `?`. Not always: a
+  zombie keeps its name until reaped, and a PID the OS reuses for an
+  unrelated process holding no GPU memory reads that process's name.
 - **One GPU per watch.** `hmn watch` watches `--device` (default `0`). On a
   multi-GPU node, `hmn ps`'s GPU column shows which GPU holds your job, and
   since v0.2.15 `hmn watch` says so at attach when it is elsewhere (`pid=N
@@ -369,8 +372,9 @@ is a hard error (exit `2`).
   an unrelated process mid-watch, a resolved-name change between samples is
   used as the signal to reset that row's baseline — so the closing summary
   describes the new process, not a mix of both. This can't catch every case
-  (two same-named processes recycling the PID would look identical), but it
-  closes the common one.
+  (two same-named processes recycling the PID would look identical, and a
+  PID reused while missing from the listing is named but not reset, since
+  only the listing's names feed the reset), but it closes the common one.
 - **`--interval` and `--duration` take duration strings**, not raw
   milliseconds like `hmn spill --interval` — `500ms`, `30s`, `5m`, `1h`, or a
   bare number (seconds). Shorter intervals catch brief flicker episodes at
