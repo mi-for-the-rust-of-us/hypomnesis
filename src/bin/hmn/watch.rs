@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use hypomnesis::{
-    GpuProcessEntry, SpillReport, SpillTracker, device_info, gpu_process_listing, process_exists,
-    process_name, snapshot_is_spilling,
+    GpuProcessEntry, SpillReport, SpillTracker, device_count, device_info, gpu_process_listing,
+    process_exists, process_name, snapshot_is_spilling,
 };
 
 use crate::format::{
@@ -893,6 +893,14 @@ impl Selection {
         out
     }
 
+    /// Whether auto-selection narrows by `--filter` or `--min`, so that
+    /// what another device holds is a *match*, not merely a GPU process
+    /// ([`other_device_hint`]).
+    #[must_use]
+    const fn has_criterion(&self) -> bool {
+        !self.filters.is_empty() || self.min_bytes.is_some()
+    }
+
     /// Write the `start` record's `"selection"` object into `out`: `mode`
     /// (`"explicit"`, `"top"` or `"follow_new"`), the explicit `pids`
     /// (empty in the auto modes), `top` (`null` in explicit mode, where it
@@ -1023,27 +1031,237 @@ fn spilling_at_attach_notice(
     })
 }
 
+/// The other devices' process listings, as `(index, rows)`, read once at
+/// attach when the watched device does not hold the work ([`probe_pids`]
+/// missing, or nothing selected), so `hmn watch` can say where the work is
+/// (since v0.2.15). Every index below `count` but `device`, in order; a
+/// device whose listing fails (`list` returns `None`) is left out, and with
+/// no count (`None`) there is nothing to list. `list` is
+/// `hypomnesis::gpu_process_listing`'s entries in `run_watch`, a stub in
+/// tests.
+#[must_use]
+fn other_device_listings(
+    device: u32,
+    count: Option<u32>,
+    list: impl Fn(u32) -> Option<Vec<GpuProcessEntry>>,
+) -> Vec<(u32, Vec<GpuProcessEntry>)> {
+    (0..count.unwrap_or(0))
+        .filter(|&index| index != device)
+        .filter_map(|index| list(index).map(|rows| (index, rows)))
+        .collect()
+}
+
+/// The explicit PIDs worth looking for on the other devices: those the
+/// watched device's first listing `listed` does not hold and the caller was
+/// not refused (`denied`, which [`denied_pid_notices`] names instead).
+#[must_use]
+fn probe_pids(explicit: &[u32], listed: &[GpuProcessEntry], denied: &[u32]) -> Vec<u32> {
+    explicit
+        .iter()
+        .copied()
+        .filter(|&pid| !listed.iter().any(|e| e.pid == pid) && !denied.contains(&pid))
+        .collect()
+}
+
+/// `items` joined for prose: `a`, `a and b`, `a, b and c` (with `or` for
+/// `conjunction` to offer alternatives).
+#[must_use]
+fn prose_list(items: &[String], conjunction: &str) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} {conjunction} {last}", init.join(", ")),
+    }
+}
+
+/// The attach-time stderr notices for explicit PIDs (`pids`, from
+/// [`probe_pids`]) that another device's listing holds, one per such PID:
+/// `hmn watch: pid=1415320 holds 10.4 GiB on device 1, not device 0; its
+/// rows will read 0 MiB — re-run with --device 1` (since v0.2.15), every
+/// device that holds it named. A PID no other device holds gets none.
+#[must_use]
+fn other_device_pid_notices(
+    pids: &[u32],
+    device: u32,
+    elsewhere: &[(u32, Vec<GpuProcessEntry>)],
+) -> Vec<String> {
+    pids.iter()
+        .filter_map(|&pid| {
+            let held: Vec<(u32, u64)> = elsewhere
+                .iter()
+                .filter_map(|(index, rows)| {
+                    rows.iter()
+                        .find(|e| e.pid == pid)
+                        .map(|e| (*index, e.used_bytes))
+                })
+                .collect();
+            if held.is_empty() {
+                return None;
+            }
+            let holdings: Vec<String> = held
+                .iter()
+                .map(|&(index, bytes)| format!("{} on device {index}", format_vram(bytes)))
+                .collect();
+            let options: Vec<String> = held
+                .iter()
+                .map(|&(index, _)| format!("--device {index}"))
+                .collect();
+            Some(format!(
+                "hmn watch: pid={pid} holds {}, not device {device}; its rows will read 0 MiB \
+                 — re-run with {}",
+                prose_list(&holdings, "and"),
+                prose_list(&options, "or")
+            ))
+        })
+        .collect()
+}
+
+/// What auto-selection would pick on each other device: `(index, pids)`
+/// for every device in `elsewhere` where [`Selection::select`], the same
+/// rule as on the watched device, picks at least one process. Judged from
+/// a fresh [`WatchState`], since no sample of those devices was ever taken.
+#[must_use]
+fn selectable_elsewhere(
+    selection: &Selection,
+    elsewhere: &[(u32, Vec<GpuProcessEntry>)],
+) -> Vec<(u32, Vec<u32>)> {
+    let fresh = WatchState::new();
+    elsewhere
+        .iter()
+        .filter_map(|(index, rows)| {
+            let pids = selection.select(rows, &fresh).pids;
+            (!pids.is_empty()).then_some((*index, pids))
+        })
+        .collect()
+}
+
+/// The hint naming the devices where auto-selection would pick something
+/// ([`selectable_elsewhere`]), or `None` when there are none: `device 5
+/// has a match (pid 2860458): re-run with --device 5`, or `devices 1 and 5
+/// have matches (pid 2860458 on device 1; pids 11, 12 on device 5): re-run
+/// with --device 1 or --device 5`. A *match* when `criterion` (`--filter`
+/// or `--min` narrowed the choice), else a *GPU process*.
+#[must_use]
+fn other_device_hint(found: &[(u32, Vec<u32>)], criterion: bool) -> Option<String> {
+    let (one, many) = if criterion {
+        ("match", "matches")
+    } else {
+        ("GPU process", "GPU processes")
+    };
+    let pid_list = |pids: &[u32]| {
+        let listed: Vec<String> = pids.iter().map(u32::to_string).collect();
+        let noun = if pids.len() == 1 { "pid" } else { "pids" };
+        format!("{noun} {}", listed.join(", "))
+    };
+    let options: Vec<String> = found
+        .iter()
+        .map(|(index, _)| format!("--device {index}"))
+        .collect();
+    let options = prose_list(&options, "or");
+    match found {
+        [] => None,
+        [(index, pids)] => {
+            let noun = if pids.len() == 1 {
+                format!("a {one}")
+            } else {
+                many.to_owned()
+            };
+            Some(format!(
+                "device {index} has {noun} ({}): re-run with {options}",
+                pid_list(pids)
+            ))
+        }
+        _ => {
+            let indices: Vec<String> = found.iter().map(|(index, _)| index.to_string()).collect();
+            let per_device: Vec<String> = found
+                .iter()
+                .map(|(index, pids)| format!("{} on device {index}", pid_list(pids)))
+                .collect();
+            Some(format!(
+                "devices {} have {many} ({}): re-run with {options}",
+                prose_list(&indices, "and"),
+                per_device.join("; ")
+            ))
+        }
+    }
+}
+
+/// The stderr line when attach selected nothing on `device`, which holds
+/// `listed` processes. With none, the v0.2.14 lines, byte for byte; with
+/// some (none matching), it says so, where v0.2.14 said "found no GPU
+/// processes" though the device held another user's (issue #4, note 1):
+/// `hmn: watch found 1 GPU process on device 0, none to auto-select (top 5
+/// among names containing "x" (case-insensitive)); <tail>`. Without
+/// `--follow-new` the tail is `hint` when another device has what the
+/// selection wants ([`other_device_hint`]), else the advice to re-run with
+/// an explicit PID; under `--follow-new` it is `waiting for work to
+/// appear`, and the caller prints the hint on a line of its own. `because`
+/// is the unreadable clause, `; `-led, or empty.
+#[must_use]
+fn nothing_selected_message(
+    device: u32,
+    listed: usize,
+    selection: &Selection,
+    because: &str,
+    hint: Option<&str>,
+) -> String {
+    let top = selection.top;
+    let criterion = selection.criterion();
+    let found = match listed {
+        0 => format!("no GPU processes on device {device}"),
+        1 => format!("1 GPU process on device {device},"),
+        n => format!("{n} GPU processes on device {device},"),
+    };
+    if selection.follow_new {
+        let what = if listed == 0 {
+            "yet"
+        } else {
+            "none to follow yet"
+        };
+        format!(
+            "hmn: watch found {found} {what} (top {top} by committed{criterion}{because}); \
+             waiting for work to appear"
+        )
+    } else {
+        let what = if listed == 0 {
+            "to auto-select"
+        } else {
+            "none to auto-select"
+        };
+        let tail = hint.unwrap_or("re-run with an explicit PID once a workload is running");
+        format!("hmn: watch found {found} {what} (top {top}{criterion}{because}); {tail}")
+    }
+}
+
 /// The attach-time stderr warnings for explicit PIDs that name no running
 /// process: one per PID in `explicit` that `listed` (the first sample)
-/// does not hold, that is not in `denied` (the PIDs the caller was refused,
-/// which [`denied_pid_notices`] names instead, so one PID never gets both
-/// notices) and that `exists` answers `Some(false)` for. A PID in the
-/// listing plainly exists and is not asked about; `None` ("can't tell")
-/// says nothing. Such a PID is still watched, as before, so a typo is
-/// told apart from a process that merely holds no GPU memory yet — the
-/// one distinction `hmn watch` can make at attach; mid-watch it still
-/// cannot tell "exited" from "holds no GPU memory". `exists` is
+/// does not hold, that no other device's listing (`elsewhere`) holds, that
+/// is not in `denied` (the PIDs the caller was refused, which
+/// [`denied_pid_notices`] names instead, so one PID never gets both
+/// notices) and that `exists` answers `Some(false)` for. A PID in a
+/// listing plainly exists and is not asked about — one on another device
+/// gets [`other_device_pid_notices`] instead; `None` ("can't tell") says
+/// nothing. Such a PID is still watched, as before, so a typo is told
+/// apart from a process that merely holds no GPU memory yet — the one
+/// distinction `hmn watch` can make at attach; mid-watch it still cannot
+/// tell "exited" from "holds no GPU memory". `exists` is
 /// `hypomnesis::process_exists` in `run_watch`, a stub in tests.
 #[must_use]
 fn missing_pid_notices(
     explicit: &[u32],
     listed: &[GpuProcessEntry],
+    elsewhere: &[(u32, Vec<GpuProcessEntry>)],
     denied: &[u32],
     exists: impl Fn(u32) -> Option<bool>,
 ) -> Vec<String> {
     explicit
         .iter()
         .filter(|&&pid| !listed.iter().any(|e| e.pid == pid))
+        .filter(|&&pid| {
+            !elsewhere
+                .iter()
+                .any(|(_, rows)| rows.iter().any(|e| e.pid == pid))
+        })
         .filter(|pid| !denied.contains(pid))
         .filter(|&&pid| exists(pid) == Some(false))
         .map(|pid| {
@@ -1213,28 +1431,52 @@ pub fn run_watch(
     let mut announced = HashSet::new();
     let first = selection.select(&first_rows, &state);
     let mut watched = first.pids;
+    // The other devices, listed once, at attach, and only when the watched
+    // device does not hold the work: an explicit PID missing from it, or
+    // nothing selected. Each listing opens an NVML session.
+    let probe = probe_pids(&selection.explicit, &first_rows, &denied);
+    let elsewhere = if probe.is_empty() && !watched.is_empty() {
+        Vec::new()
+    } else {
+        other_device_listings(device, device_count().ok(), |index| {
+            gpu_process_listing(index)
+                .ok()
+                .map(|listing| listing.entries)
+        })
+    };
     // Sized once, from the processes watched at attach, so the header and
     // every interval's rows share one NAME width.
     let name_width = watch_name_width(&first_rows, &watched, process_name);
     if watched.is_empty() {
-        let top = selection.top;
-        let criterion = selection.criterion();
         // Why, when processes were refused: the count and the remedy go
         // inside the parentheses, so the line says it on its own.
         let because = unreadable
             .as_deref()
             .map_or_else(String::new, |clause| format!("; {clause}"));
-        if selection.follow_new {
-            eprintln!(
-                "hmn: watch found no GPU processes on device {device} yet (top {top} by \
-                 committed{criterion}{because}); waiting for work to appear"
-            );
-        } else {
-            eprintln!(
-                "hmn: watch found no GPU processes on device {device} to auto-select \
-                 (top {top}{criterion}{because}); re-run with an explicit PID once a workload is running"
-            );
+        let hint = other_device_hint(
+            &selectable_elsewhere(selection, &elsewhere),
+            selection.has_criterion(),
+        );
+        // Before the line, which may end the watch: a process `--filter`
+        // could not judge is never passed over silently.
+        for notice in unmatchable_notices(&first.unmatchable, &mut announced) {
+            eprintln!("{notice}");
+        }
+        eprintln!(
+            "{}",
+            nothing_selected_message(
+                device,
+                first_rows.len(),
+                selection,
+                &because,
+                hint.as_deref()
+            )
+        );
+        if !selection.follow_new {
             return std::process::ExitCode::from(2);
+        }
+        if let Some(hint) = hint {
+            eprintln!("hmn watch: {hint}");
         }
     }
 
@@ -1285,7 +1527,16 @@ pub fn run_watch(
     for notice in denied_pid_notices(&selection.explicit, &denied, REMEDY_OUTSIDE_SANDBOX) {
         eprintln!("{notice}");
     }
-    for notice in missing_pid_notices(&selection.explicit, &first_rows, &denied, process_exists) {
+    for notice in other_device_pid_notices(&probe, device, &elsewhere) {
+        eprintln!("{notice}");
+    }
+    for notice in missing_pid_notices(
+        &selection.explicit,
+        &first_rows,
+        &elsewhere,
+        &denied,
+        process_exists,
+    ) {
         eprintln!("{notice}");
     }
     for notice in unmatchable_notices(&first.unmatchable, &mut announced) {
@@ -2526,12 +2777,164 @@ mod tests {
             _ => Some(true),
         };
         assert_eq!(
-            missing_pid_notices(&[15534, 15503, 999_999, 42], &listed, &[], exists),
+            missing_pid_notices(&[15534, 15503, 999_999, 42], &listed, &[], &[], exists),
             ["hmn watch: pid=999999 names no running process; its rows will read 0 MiB"]
         );
         // Auto-selection has no explicit PIDs: nothing to warn about.
-        let notices = missing_pid_notices(&[], &listed, &[], |_| Some(false));
+        let notices = missing_pid_notices(&[], &listed, &[], &[], |_| Some(false));
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn missing_pid_notices_skip_a_pid_listed_on_another_device() {
+        // `exists` would call it gone (it exited between the probe and the
+        // check, say), but another device's listing holds it:
+        // `other_device_pid_notices` speaks for it instead.
+        let elsewhere = [(1, vec![entry(77, Some("python"), 1 << 30, 0)])];
+        let notices = missing_pid_notices(&[77], &[], &elsewhere, &[], |_| Some(false));
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    // --- other devices (issue #4, note 1) ---
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn other_device_listings_list_every_other_device_that_answers() {
+        let list = |index: u32| (index != 2).then(|| vec![entry(index + 100, None, 0, 0)]);
+        let found = other_device_listings(0, Some(4), list);
+        let indices: Vec<u32> = found.iter().map(|(index, _)| *index).collect();
+        // Device 0 is the watched one; device 2's listing failed.
+        assert_eq!(indices, [1, 3]);
+        let none = other_device_listings(0, None, list);
+        assert!(none.is_empty(), "{none:?}");
+        let alone = other_device_listings(0, Some(1), list);
+        assert!(alone.is_empty(), "{alone:?}");
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn probe_pids_are_the_explicit_pids_missing_and_not_denied() {
+        let listed = [entry(1, Some("a"), 0, 0)];
+        assert_eq!(probe_pids(&[1, 2, 3], &listed, &[3]), [2]);
+        let none = probe_pids(&[], &listed, &[]);
+        assert!(none.is_empty(), "{none:?}");
+    }
+
+    #[test]
+    fn prose_list_joins_for_prose() {
+        let words = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(prose_list(&words(&[]), "and"), "");
+        assert_eq!(prose_list(&words(&["a"]), "and"), "a");
+        assert_eq!(prose_list(&words(&["a", "b"]), "or"), "a or b");
+        assert_eq!(prose_list(&words(&["a", "b", "c"]), "and"), "a, b and c");
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn other_device_pid_notices_name_every_device_holding_the_pid() {
+        let gib = 1 << 30;
+        let elsewhere = [
+            (
+                1,
+                vec![entry(1_415_320, Some("python"), 10 * gib + gib / 2, 0)],
+            ),
+            (2, vec![entry(7, Some("holder"), gib, 0)]),
+            (3, vec![entry(7, Some("holder"), gib, 0)]),
+        ];
+        assert_eq!(
+            other_device_pid_notices(&[1_415_320, 7, 99], 0, &elsewhere),
+            [
+                "hmn watch: pid=1415320 holds 10.5 GiB on device 1, not device 0; its rows will \
+                 read 0 MiB — re-run with --device 1",
+                "hmn watch: pid=7 holds 1.0 GiB on device 2 and 1.0 GiB on device 3, not device \
+                 0; its rows will read 0 MiB — re-run with --device 2 or --device 3",
+            ]
+        );
+    }
+
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn selectable_elsewhere_applies_the_watched_device_s_rule() {
+        let selection = Selection::new(&[], 5, false, &["sleep".to_owned()], None).unwrap();
+        let elsewhere = [
+            (1, vec![entry(10, Some("python"), 1 << 30, 0)]),
+            (5, vec![entry(2_860_458, Some("sleep"), 1 << 30, 0)]),
+        ];
+        assert_eq!(
+            selectable_elsewhere(&selection, &elsewhere),
+            [(5, vec![2_860_458])]
+        );
+    }
+
+    #[test]
+    fn other_device_hint_names_where_the_selection_has_something() {
+        assert_eq!(other_device_hint(&[], true), None);
+        assert_eq!(
+            other_device_hint(&[(5, vec![2_860_458])], true).as_deref(),
+            Some("device 5 has a match (pid 2860458): re-run with --device 5")
+        );
+        assert_eq!(
+            other_device_hint(&[(5, vec![11, 12])], true).as_deref(),
+            Some("device 5 has matches (pids 11, 12): re-run with --device 5")
+        );
+        assert_eq!(
+            other_device_hint(&[(1, vec![2_860_458]), (5, vec![11, 12])], true).as_deref(),
+            Some(
+                "devices 1 and 5 have matches (pid 2860458 on device 1; pids 11, 12 on device \
+                 5): re-run with --device 1 or --device 5"
+            )
+        );
+        assert_eq!(
+            other_device_hint(&[(1, vec![1]), (3, vec![3]), (5, vec![5])], true).as_deref(),
+            Some(
+                "devices 1, 3 and 5 have matches (pid 1 on device 1; pid 3 on device 3; pid 5 \
+                 on device 5): re-run with --device 1, --device 3 or --device 5"
+            )
+        );
+        // Without `--filter` or `--min`, what another device holds is a
+        // GPU process, not a match.
+        assert_eq!(
+            other_device_hint(&[(1, vec![7])], false).as_deref(),
+            Some("device 1 has a GPU process (pid 7): re-run with --device 1")
+        );
+    }
+
+    #[test]
+    fn nothing_selected_message_keeps_the_empty_device_lines_and_counts_the_rest() {
+        let auto = Selection::new(&[], 5, false, &["fieldcheck".to_owned()], None).unwrap();
+        let follow = Selection::new(&[], 3, true, &["spillforge".to_owned()], None).unwrap();
+        // An empty device: the v0.2.14 lines, byte for byte.
+        assert_eq!(
+            nothing_selected_message(0, 0, &auto, "", None),
+            "hmn: watch found no GPU processes on device 0 to auto-select (top 5 among names \
+             containing \"fieldcheck\" (case-insensitive)); re-run with an explicit PID once a \
+             workload is running"
+        );
+        assert_eq!(
+            nothing_selected_message(0, 0, &follow, "", None),
+            "hmn: watch found no GPU processes on device 0 yet (top 3 by committed among names \
+             containing \"spillforge\" (case-insensitive)); waiting for work to appear"
+        );
+        // A device holding processes, none matching: the issue #4 case.
+        assert_eq!(
+            nothing_selected_message(
+                0,
+                1,
+                &auto,
+                "",
+                Some("device 5 has a match (pid 2860458): re-run with --device 5")
+            ),
+            "hmn: watch found 1 GPU process on device 0, none to auto-select (top 5 among names \
+             containing \"fieldcheck\" (case-insensitive)); device 5 has a match (pid \
+             2860458): re-run with --device 5"
+        );
+        assert_eq!(
+            nothing_selected_message(2, 3, &follow, "", Some("unused")),
+            "hmn: watch found 3 GPU processes on device 2, none to follow yet (top 3 by \
+             committed among names containing \"spillforge\" (case-insensitive)); waiting for \
+             work to appear"
+        );
     }
 
     // --- denied explicit PIDs and the unreadable count ---
@@ -2563,7 +2966,7 @@ mod tests {
         // `exists` would call both PIDs gone; 999 is denied, so it is not
         // named, and 998, which is not, is.
         assert_eq!(
-            missing_pid_notices(&[999, 998], &[], &[999], |_| Some(false)),
+            missing_pid_notices(&[999, 998], &[], &[], &[999], |_| Some(false)),
             ["hmn watch: pid=998 names no running process; its rows will read 0 MiB"]
         );
     }

@@ -359,6 +359,12 @@ enum Commands {
     /// running process gets a one-line warning on stderr (since
     /// v0.2.13), and so does one that is unreadable here (a macOS
     /// sandbox's refusal: its rows read 0 MiB); both are still watched.
+    /// It watches one device (`--device`, default 0). Since v0.2.15, when
+    /// the watched device does not hold the work, it lists the other
+    /// devices once, at attach, and says where the work is: an explicit
+    /// PID held on another device gets a notice naming that device, and
+    /// when auto-selection finds nothing it says which device has what
+    /// it would select (`re-run with --device N`).
     /// `--follow-new` says how many processes it cannot follow. Spill is
     /// measured as shared-memory growth above the first sample, so a
     /// spill already under way at attach is not counted; since v0.2.13 a
@@ -434,7 +440,10 @@ enum Commands {
         /// Combining this with explicit PID(s) is a hard error (exit `2`).
         #[arg(long, value_name = "SIZE", value_parser = parse_size_bytes)]
         min: Option<u64>,
-        /// GPU index to watch (NVML-canonical ordering).
+        /// GPU index to watch (NVML-canonical ordering). One device per
+        /// watch: on a multi-GPU node, `hmn ps` shows which GPU holds a
+        /// process (its GPU column), and `hmn watch` says so at attach
+        /// when the work is elsewhere.
         #[arg(long, value_name = "INDEX", default_value_t = 0)]
         device: u32,
         /// Emit JSON Lines to stdout instead of a text table. Since

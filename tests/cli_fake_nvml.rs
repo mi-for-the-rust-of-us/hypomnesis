@@ -593,6 +593,125 @@ fn watch_names_a_pid_absent_from_the_listing() {
     );
 }
 
+/// `hmn watch --filter` watches GPU 0 unless told otherwise. With the job
+/// on GPU 1 and another process on GPU 0, it says GPU 0 holds a process
+/// but none to select, and where the filter does match, where v0.2.14
+/// said "found no GPU processes on device 0" and pointed nowhere (issue
+/// #4, note 1). Without `--follow-new` the exit stays `2`; with it, the
+/// hint gets a line of its own and the watch goes on.
+#[test]
+fn watch_auto_select_names_the_device_where_the_filter_matches() {
+    let Some(fake) = FakeNvml::build("watch-hint") else {
+        return;
+    };
+    let job = Sleeper::start();
+    let pid = job.pid();
+    // PID 1 (not a `sleep`) holds memory on GPU 0, the job on GPU 1.
+    let procs = format!("0:1:1073741824,1:{pid}:1073741824");
+    let env = [
+        ("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,NVIDIA H100 NVL"),
+        ("FAKE_NVML_PROCS", procs.as_str()),
+    ];
+    let hint = format!("device 1 has a match (pid {pid}): re-run with --device 1");
+
+    let run = fake.hmn(
+        &[
+            "watch",
+            "--filter",
+            "sleep",
+            "--interval",
+            "1s",
+            "--duration",
+            "1s",
+        ],
+        &env,
+    );
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            &format!(
+                "hmn: watch found 1 GPU process on device 0, none to auto-select (top 5 among \
+                 names containing \"sleep\" (case-insensitive)); {hint}"
+            )
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+
+    let run = fake.hmn(
+        &[
+            "watch",
+            "--follow-new",
+            "--filter",
+            "sleep",
+            "--interval",
+            "1s",
+            "--duration",
+            "1s",
+        ],
+        &env,
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            "hmn: watch found 1 GPU process on device 0, none to follow yet (top 5 by committed \
+             among names containing \"sleep\" (case-insensitive)); waiting for work to appear"
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        has_line(&run.stderr, &format!("hmn watch: {hint}")),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+/// An explicit PID that holds memory on another GPU gets a notice naming
+/// that GPU and its size, not the "names no running process" warning, and
+/// its rows carry its name though they read 0 MiB (issue #4, note 1).
+#[test]
+fn watch_flags_an_explicit_pid_on_another_device() {
+    let Some(fake) = FakeNvml::build("watch-elsewhere") else {
+        return;
+    };
+    let job = Sleeper::start();
+    let pid = job.pid();
+    let procs = format!("1:{pid}:10737418240");
+    let env = [
+        ("FAKE_NVML_DEVICES", "NVIDIA H100 NVL,NVIDIA H100 NVL"),
+        ("FAKE_NVML_PROCS", procs.as_str()),
+    ];
+    let run = fake.hmn(
+        &["watch", &pid, "--interval", "1s", "--duration", "1s"],
+        &env,
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        has_line(
+            &run.stderr,
+            &format!(
+                "hmn watch: pid={pid} holds 10.0 GiB on device 1, not device 0; its rows will \
+                 read 0 MiB — re-run with --device 1"
+            )
+        ),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("names no running process"),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        count_named_rows(&run.stdout, &pid, "sleep") >= 2,
+        "stdout: {}",
+        run.stdout
+    );
+}
+
 /// The control: a fake that works reads as a GPU, every figure from the
 /// fake's constants (16 GiB, 512 MiB reserved, driver `999.99`), so the
 /// tests above fail for the reason they name and not because the fake

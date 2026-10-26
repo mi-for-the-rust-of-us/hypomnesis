@@ -361,7 +361,18 @@ sample renders `0 MiB` — `hmn watch` cannot distinguish "exited" from
 `--duration` or Ctrl+C. At attach, though, an explicit PID that names no
 running process at all — a typo — gets a one-line stderr warning (since
 v0.2.13: `hmn watch: pid=999999 names no running process; its rows will read
-0 MiB`), and is still watched. `--interval` / `--duration` take duration strings
+0 MiB`), and is still watched. A watched PID missing from the listing is named
+by a direct lookup (since v0.2.15), so a live process on another GPU, or one
+holding no GPU memory, reads its own name rather than `?`.
+
+`hmn watch` watches one GPU, `--device` (default `0`). On a multi-GPU node,
+since v0.2.15, it says where the work is when the watched GPU does not hold it.
+An explicit PID held on another GPU gets
+`hmn watch: pid=1415320 holds 10.4 GiB on device 1, not device 0; its rows will read 0 MiB — re-run with --device 1`,
+and an auto-selection that finds nothing names the GPU that has what it wants:
+`hmn: watch found 1 GPU process on device 0, none to auto-select (top 5 among names containing "fieldcheck" (case-insensitive)); device 5 has a match (pid 2860458): re-run with --device 5`
+(exit `2`; under `--follow-new` the hint gets a line of its own and the watch
+goes on). `--interval` / `--duration` take duration strings
 (`500ms`, `30s`, `5m`, `1h`, or a bare number of seconds) rather than raw
 milliseconds.
 

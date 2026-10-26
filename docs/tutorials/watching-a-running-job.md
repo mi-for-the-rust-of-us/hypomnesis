@@ -277,7 +277,10 @@ hmn watch: per-PID  PID    NAME            BASELINE COMMIT  PEAK COMMIT  BASELIN
 taken a slot, and neither appears. The workload stayed under the saturation
 threshold, so no spill — the point here is what was recorded. Captured before
 v0.2.13, whose rows line up under the header and whose per-PID table adds a
-`PAGED` column.)*
+`PAGED` column. Since v0.2.15 the first line counts what device 0 did hold:
+`hmn: watch found 2 GPU processes on device 0, none to follow yet (…); waiting
+for work to appear`, and when another GPU has a match a second line says so,
+`hmn watch: device 1 has a match (pid …): re-run with --device 1`.)*
 
 What to notice:
 

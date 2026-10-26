@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks `proc_pidpath`, then `p_comm` where a sandbox refuses the path. Item 9 of
   [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
+- **`hmn watch` says which GPU holds the work when the watched one does not**
+  (`src/bin/hmn/watch.rs`, `main.rs`) — `hmn watch` watches one GPU (`--device`, default `0`).
+  When an explicit PID is missing from it, or auto-selection picks nothing, it now lists the other
+  GPUs once, at attach, and says where the work is. An explicit PID held elsewhere gets
+  `hmn watch: pid=1415320 holds 10.4 GiB on device 1, not device 0; its rows will read 0 MiB —
+  re-run with --device 1`, never also the "names no running process" warning. An empty
+  auto-selection names the GPUs where the same rule would pick something:
+  `…; device 5 has a match (pid 2860458): re-run with --device 5` (exit `2` as before; under
+  `--follow-new` on a line of its own, and the watch goes on). Issue #4, note 1; item 10.
+
 ### Changed
 
 - **`NoGpuSource` names only the backends the platform has** (`src/error.rs`) — on Linux, and
@@ -35,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GPUs printed two identical rows. An unknown model name now reads `?` in DEVICE, where it read
   `GPU N`, which would repeat the new column. `--json` already carried `device_index` and is
   unchanged. The README transcripts are re-captured. Issue #4, note 3; item 6.
+
+- **`hmn watch` counts what the watched GPU holds when it selects nothing**
+  (`src/bin/hmn/watch.rs`) — on a GPU holding another user's process but nothing matching
+  `--filter`, it said `found no GPU processes on device 0`, which read as nothing running. It now
+  says `found 1 GPU process on device 0, none to auto-select (…)` (`none to follow yet` under
+  `--follow-new`); on a GPU with no process at all the line is unchanged. A process `--filter`
+  could not judge is now named before that line, where an empty selection ended the watch before
+  it was. Issue #4, note 1; item 10.
 
 - **`hmn ps` says when there is no GPU to list** (`src/bin/hmn/ps.rs`, `main.rs`) — with no
   `--device` and no device to try (NVML counted zero, as in a Slurm job given no GPU, or no NVIDIA
