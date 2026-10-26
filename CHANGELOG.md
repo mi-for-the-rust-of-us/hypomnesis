@@ -129,6 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--all-features` and `--no-default-features`, all cross-documented on Ubuntu as docs.rs does;
   the publish workflow adds the `--no-default-features` build. Item 3.
 
+- **`hmn watch --follow-new` reads the refused set once, at attach, and says so**
+  (`src/bin/hmn/main.rs`, `README.md`, `docs/tutorials/watching-a-running-job.md`) — inside a macOS
+  sandbox, `--follow-new` counts the processes it cannot follow when it attaches; a refused process
+  that starts later is neither followed nor counted. `--help`, README Limitations item 9 and the
+  watch tutorial now say so; a per-interval count stays in `ROADMAP.md`. From `ROADMAP.md`'s
+  v0.2.14 follow-ups; item 11.
+
 ## [0.2.14] - 2026-10-09
 
 Answers a field check of v0.2.13 on Apple Silicon

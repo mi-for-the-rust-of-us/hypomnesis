@@ -260,8 +260,9 @@ Items that *might* land, gated on real consumer demand:
   askesis launcher.
 - **`hmn watch --follow-new` and processes a sandbox refuses after attach** (surfaced by v0.2.14's
   review of PR C) — the refused set is read once, at attach, so a refused process that starts later
-  is neither followed nor counted. At minimum a sentence in the `watch` docs; a per-interval count
-  if a consumer needs it.
+  is neither followed nor counted. The sentence in the `watch` docs shipped in v0.2.15 (`--help`,
+  README Limitations item 9, the watch tutorial); a per-interval count waits for a consumer that
+  needs it.
 - ~~**`cargo doc` for macOS without default features**~~ — *Done in v0.2.15* (surfaced by
   v0.2.14's review of PR C). The intra-doc link to `GpuQuerySource::Pdh` in `src/gpu/mod.rs`
   resolved only through a `use` that a backend feature compiles, so `--no-default-features` doc

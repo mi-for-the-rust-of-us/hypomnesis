@@ -343,6 +343,10 @@ is a hard error (exit `2`).
   `--follow-new`, and the
   [FAQ](../FAQ.md#why-doesnt-hmn-watch-show-processes-that-start-after-i-attach)
   for the short version.
+- **(macOS sandbox) `--follow-new` counts refused processes once, at
+  attach.** Inside a sandbox that refuses `process-info`, `--follow-new`
+  says how many processes it cannot follow when it attaches; a refused
+  process that starts later is neither followed nor counted.
 - **Rank vs. identity.** Auto-selection ranks by committed `VRAM`, so the
   desktop competes for every slot `--top` offers. To record only your own
   program, add `--filter <name>` — see

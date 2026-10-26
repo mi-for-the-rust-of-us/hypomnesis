@@ -1415,9 +1415,11 @@ pub fn run_watch(
             return std::process::ExitCode::from(2);
         }
     };
-    // The processes the caller was refused. A sandbox does not change
-    // mid-run, so this set is read once, at attach, and every notice about
-    // it is said once; the interval loop lists `entries` only.
+    // The processes the caller was refused, read once, at attach, and every
+    // notice about them said once; the interval loop lists `entries` only.
+    // The sandbox does not change mid-run, but which processes it refuses
+    // can: a refused process that starts later is neither followed nor
+    // counted (`--help` says so; a per-interval count is a ROADMAP item).
     let denied = first_listing.denied_pids;
     let first_rows = first_listing.entries;
     let unreadable = remedy_clause(0, denied.len(), REMEDY_OUTSIDE_SANDBOX);

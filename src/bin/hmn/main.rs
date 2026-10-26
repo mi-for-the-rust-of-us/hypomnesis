@@ -365,7 +365,9 @@ enum Commands {
     /// PID held on another device gets a notice naming that device, and
     /// when auto-selection finds nothing it says which device has what
     /// it would select (`re-run with --device N`).
-    /// `--follow-new` says how many processes it cannot follow. Spill is
+    /// `--follow-new` says how many processes it cannot follow; it reads
+    /// that set once, at attach, so a process the sandbox refuses that
+    /// starts later is neither followed nor counted. Spill is
     /// measured as shared-memory growth above the first sample, so a
     /// spill already under way at attach is not counted; since v0.2.13 a
     /// warning says so at attach and the closing summary repeats it
