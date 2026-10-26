@@ -174,7 +174,7 @@ says so (item 12).
 | 9 | `process_name`; `hmn watch` names PIDs the listing lacks (note 2) | **fix** | ✅ |
 | 10 | `hmn watch` says which device holds the work (note 1) | feature | ✅ |
 | 11 | `--follow-new` reads the refused set once, at attach: say so | docs | ✅ |
-| 12 | README, FAQ, tutorials, `CHANGELOG.md`, `ROADMAP.md` | docs | ⬜ |
+| 12 | README, FAQ, tutorials, `CHANGELOG.md`, `ROADMAP.md` | docs | ✅ |
 
 Every item updates the `CHANGELOG.md`, `--help`, README and FAQ text it makes stale, as in v0.2.13
 and v0.2.14, and adds its tests to the fake NVML where a GPU would be needed. Item 12 covers what

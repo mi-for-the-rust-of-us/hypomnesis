@@ -304,8 +304,11 @@ impl Snapshot {
     ///
     /// On Linux: enumerates NVIDIA dGPU(s) via `NVML`. AMD / Intel iGPUs
     /// do not surface — there is no AMD / Intel backend yet (an AMD
-    /// `ROCm` SMI backend and an Apple Metal backend are possibilities
-    /// for a later release; see `docs/roadmap-v0.2.0.md`).
+    /// `ROCm` SMI backend is a possibility for a later release; see
+    /// `docs/roadmap-v0.2.0.md`).
+    ///
+    /// On macOS (`metal` feature, since v0.2.3): the Apple Silicon GPU, one
+    /// unified-memory device.
     ///
     /// On Windows: enumerates NVIDIA dGPU(s) via `NVML` *plus* every
     /// other `DXGI` adapter that exposes

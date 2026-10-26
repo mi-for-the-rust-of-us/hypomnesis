@@ -15,6 +15,8 @@ the authoritative source (README limitation, rustdoc, or per-release roadmap).
 - [Why is the saturation threshold 85% and not 95% (or 100%)?](#why-is-the-saturation-threshold-85-and-not-95-or-100)
 - [Why is everything spill-related 0 / `false` on Linux and macOS?](#why-is-everything-spill-related-0--false-on-linux-and-macos)
 - [What does a `?` in the NAME column mean — and when do I need elevation?](#what-does-a--in-the-name-column-mean--and-when-do-i-need-elevation)
+- [Why does `hmn` or `hmn ps` exit 2, and what does `(skipped)` mean?](#why-does-hmn-or-hmn-ps-exit-2-and-what-does-skipped-mean)
+- [On a multi-GPU node, or in a Slurm job, which GPU is `--device N`?](#on-a-multi-gpu-node-or-in-a-slurm-job-which-gpu-is---device-n)
 - [Why is there no `hmn kill` or `hmn spill --kill`?](#why-is-there-no-hmn-kill-or-hmn-spill---kill)
 - [Are the numbers exact? What about the KB 4490156 drift and the R570 sentinel?](#are-the-numbers-exact-what-about-the-kb-4490156-drift-and-the-r570-sentinel)
 - [Can I use `SpillTracker` from another thread?](#can-i-use-spilltracker-from-another-thread)
@@ -330,6 +332,60 @@ warning `names no running process`. The lookup only names the row and the
 closing summary: a name it spells differently from the listing (the
 `nvidia-smi` fallback's) never resets the PID's baseline as a PID reuse
 would.
+
+## Why does `hmn` or `hmn ps` exit 2, and what does `(skipped)` mean?
+
+`2` means **could not tell**: `hmn` refuses to let a broken driver or an
+unreadable device read as an idle machine. `1` is reserved for a real
+negative answer, and only `hmn ps --exit-status` gives it.
+
+| Command | `0` | `1` | `2` |
+|---|---|---|---|
+| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`); nothing on stdout, `--json` included |
+| `hmn ps` | the listing, even empty, devices that failed skipped | with `--exit-status` only: nothing listed, every device tried answered, and no process the filters could match was unreadable — including `(no GPU to list)` | a `--device` that cannot be listed; every device failed; the devices could not be counted; with `--exit-status`, nothing listed and a device was skipped or a process the filters could match was unreadable |
+| `hmn watch` | no spill observed | spill observed | the watched device could not be listed, nothing to auto-select, or an invalid flag combination |
+
+A device that fails to answer gets a line on stderr:
+`hmn ps` writes `hmn: ps failed to query device N: <reason>`, and `hmn` writes
+`hmn: failed to query device N: <reason>`. Ending in **`(skipped)`**, the
+line means the listing went on without that device. With no suffix it is a
+`--device N` that could not be listed, and the exit is `2`. The text after
+the colon says why: `device index N out of range (have M devices)` for an
+index past the count, anything else for a device that failed (on Linux
+usually `no GPU measurement source available (NVML and nvidia-smi both failed
+or are disabled)`). For a log scan, look for the `failed to query device`
+prefix, then read the reason: the `(skipped)` suffix alone misses a fatal
+`--device` failure.
+
+The GPUs cannot be counted when the NVIDIA library loads but cannot start,
+typically `nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`
+after a driver upgrade without a reboot; `nvidia-smi` fails the same way
+there (`Failed to initialize NVML: Driver/library version mismatch`). Until
+v0.2.15 that read as a machine without GPUs: `hmn ps` printed
+`0 GPU processes found.`, and `--exit-status` exited `1`.
+
+## On a multi-GPU node, or in a Slurm job, which GPU is `--device N`?
+
+`N` is the device's index in NVML's order, the order `nvidia-smi` numbers
+GPUs in. `hmn ps` lists every device, and its GPU column (since v0.2.15)
+gives each row's index, so the rows of two GPUs of one model read apart.
+`hmn watch` watches one device, `--device` (default `0`): when the watched
+device does not hold the work, it says which one does, both for an explicit
+PID held elsewhere (`pid=N holds 10.4 GiB on device 1, not device 0 … —
+re-run with --device 1`) and for an auto-selection that finds nothing
+(`device 5 has a match (pid …): re-run with --device 5`).
+
+**Inside a GPU-isolated Slurm job** (`ConstrainDevices=yes`), NVML sees only
+the job's GPUs and numbers them from `0`. A job given physical GPU 1 sees it
+as device `0`: its processes read `"device_index":0` inside the job and
+`"device_index":1` from outside it, so captures from inside and outside a job
+cannot be joined on `device_index`. A job given **no** GPU has no device to
+list: `hmn` prints `hmn: no visible GPUs.`, `hmn ps` prints
+`hmn: 0 GPU processes found (no GPU to list).` and exits `0` (`1` under
+`--exit-status`, since the job is not on a GPU), and `--device 0` exits `2`
+with `device index 0 out of range (have 0 devices)`. Measured on a 2× H100
+NVL node under Slurm in the
+[v0.2.14 Linux field check](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4).
 
 ## Why is there no `hmn kill` or `hmn spill --kill`?
 

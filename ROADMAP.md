@@ -270,6 +270,15 @@ Items that *might* land, gated on real consumer demand:
   not resolve on its own (a plain backtick would have lost the link), and CI's doc job builds the
   three docs.rs targets with every feature and with none (`docs/roadmap-v0.2.15.md`, items 2
   and 3).
+- **The `nvidia-smi` fallback on a GPU that is really lost** (surfaced by the review of the v0.2.14
+  Linux field check, [issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)) —
+  when NVML cannot read a device, `hmn ps` falls back to `nvidia-smi --query-compute-apps`, and
+  `run_smi` (`src/gpu/nvidia_smi.rs`) takes exit `0` as success whatever it printed. If
+  `nvidia-smi` exits `0` for a lost GPU with no parsable row, that device lists as empty instead
+  of skipped, and `--exit-status` exits `1` even if the job was on it. Treating a non-blank line
+  that is not a process row as a failure would close it, but could trip on normal output nobody
+  here can produce. Un-gated by real `nvidia-smi` output for a lost GPU, which issue #4's open
+  lost-GPU check asks for.
 
 ---
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Answers a field check of v0.2.14 on two multi-GPU Linux nodes, 8× V100 and 2× H100 NVL under
+Slurm ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), by contributor
+[@LittleCoinCoin](https://github.com/LittleCoinCoin), and what reviewing it found. An NVIDIA
+driver that is installed but fails to start no longer reads as "no GPU", and `hmn` names each
+device it skips and exits `2` when it can read none. `hmn ps` gains a `GPU` column and says when
+there is no GPU to list; `hmn watch` names the watched PIDs its listing lacks, through a new
+`process_name`, and says which GPU holds the work when the watched one does not. A fake NVML lets
+Linux CI run these multi-GPU paths with no GPU. Plan:
+[`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
+
 ### Added
 
 - **`process_name(pid)`** (`src/gpu/mod.rs`, `src/gpu/metal.rs`, `src/gpu/proc_name.rs`,

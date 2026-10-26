@@ -199,7 +199,7 @@ hmn ps                       # all GPU processes — discovery command
 hmn ps --pid 12345           # filter to one PID (repeatable since v0.2.13: --pid A --pid B)
 hmn ps --filter canvas       # processes whose name contains "canvas", any case (v0.2.13)
 hmn ps --filter canvas --exit-status   # exit 1 if nothing listed (2 if a device failed, the devices could not be counted, or a process the filters could match was unreadable): "is my job on the GPU?" (v0.2.13)
-hmn ps --device 0            # filter to one GPU on multi-GPU rigs (exit 2 if it can't be listed; plain `hmn ps` exits 2 when every device failed)
+hmn ps --device 0            # filter to one GPU on multi-GPU rigs (exit 2 if it can't be listed; plain `hmn ps` exits 2 when every device failed or none could be counted)
 hmn ps --json                # scriptable output
 hmn ps --sort total           # order by dedicated + shared instead of dedicated alone
 hmn ps --min 50MiB            # hide rows below 50 MiB total footprint (since v0.2.11)
@@ -267,7 +267,7 @@ hmn: 1 GPU process found matching filter="canvas" (14.2 GiB committed total); de
 hmn: 0 GPU processes found (no GPU to list).   # no NVIDIA driver, or a job given no GPU (since v0.2.15)
 ```
 
-The stderr summary is printed even when the table is empty (except when every device failed, which prints no table and exits `2`), so interactive users get an unambiguous "command worked, here's the count" line without breaking stdout's scriptability. Pipelines like `hmn ps | awk 'NR>1 {print $1}'` or `hmn ps --json | jq` work as expected. Redirect `2>/dev/null` to suppress the summary.
+The stderr summary is printed even when the table is empty (except when every device failed or none could be counted, which prints no table and exits `2`; the [FAQ](docs/FAQ.md#why-does-hmn-or-hmn-ps-exit-2-and-what-does-skipped-mean) has the exit codes), so interactive users get an unambiguous "command worked, here's the count" line without breaking stdout's scriptability. Pipelines like `hmn ps | awk 'NR>1 {print $1}'` or `hmn ps --json | jq` work as expected. Redirect `2>/dev/null` to suppress the summary.
 
 `--sort <KEY>` (`dedicated` default, `shared`, or `total`) reorders both the text table and `--json` output — three different questions, not interchangeable: `dedicated` ("who do I kill to free VRAM?"), `shared` ("who is currently being paged out?" — a symptom, not a cause), `total` (dedicated + shared, "who is the biggest GPU-memory citizen overall?"). `dedicated` also accepts `vram` and `committed` as aliases — the words the rest of the tool's own vocabulary uses for the same quantity (the `ps` column header and `watch`'s `COMMITTED` column, respectively). Tie-breaks (name ascending, then PID ascending) are identical regardless of key. `shared`/`total` are a documented no-op ordering on Linux and macOS, where `shared_used_bytes` is always `0`.
 

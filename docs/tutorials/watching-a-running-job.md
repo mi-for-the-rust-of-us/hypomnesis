@@ -353,9 +353,18 @@ is a hard error (exit `2`).
   [Step 5](#step-5--follow-one-program-not-the-whole-machine---filter).
 - **A `0 B` / `0 B` row doesn't mean the process exited.** `hmn watch` can't
   distinguish "PID exited" from "PID alive but currently holds no GPU memory
-  on this device" — a watched PID simply renders zeroed that interval either
-  way, and `hmn watch` does not auto-stop on this basis. Use `--duration` or
-  Ctrl+C to end the watch.
+  on this device" by its bytes — a watched PID simply renders zeroed that
+  interval either way, and `hmn watch` does not auto-stop on this basis. Use
+  `--duration` or Ctrl+C to end the watch. Its NAME does tell (since
+  v0.2.15): a live process reads its own name, looked up directly, and one
+  that has exited reads `?`.
+- **One GPU per watch.** `hmn watch` watches `--device` (default `0`). On a
+  multi-GPU node, `hmn ps`'s GPU column shows which GPU holds your job, and
+  since v0.2.15 `hmn watch` says so at attach when it is elsewhere (`pid=N
+  holds 10.4 GiB on device 1, not device 0 … — re-run with --device 1`, or,
+  for an auto-selection that finds nothing, `device 1 has a match (pid …)`).
+  Inside a GPU-isolated Slurm job the indices are the job's own; see the
+  [FAQ](../FAQ.md#on-a-multi-gpu-node-or-in-a-slurm-job-which-gpu-is---device-n).
 - **PID reuse is handled best-effort.** If the OS recycles a watched PID onto
   an unrelated process mid-watch, a resolved-name change between samples is
   used as the signal to reset that row's baseline — so the closing summary
