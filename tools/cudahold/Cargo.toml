@@ -1,0 +1,13 @@
+[package]
+name = "cudahold"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Holds GPU memory through the CUDA driver API, so hypomnesis has a compute process to list"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+libloading = "0.9"
+
+[profile.dev]
+opt-level = 1
