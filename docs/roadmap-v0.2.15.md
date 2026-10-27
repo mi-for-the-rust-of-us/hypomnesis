@@ -2,7 +2,9 @@
 
 > *Say which GPU, say which device failed, and stop reading a missing name as an unreadable one.*
 
-**Status: in progress.** Not pushed; no version bump until release.
+**Status: ✅ shipped 2026-10-27.** The maintainer settled the scope on 2026-10-26 (see *Decisions
+taken*); it landed on `main` one commit per item, after the broken-`NVML` fix `43bd592`, and a
+Windows `TCC` field check on a rented Tesla V100 confirmed the rule its audit added.
 
 ---
 
