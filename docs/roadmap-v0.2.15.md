@@ -313,6 +313,14 @@ Decided on 2026-10-27, after the consistency pass:
   the driver's `nvml.dll`, and every scenario prints what the tests expect; the runner's own
   `DXGI` zero is first exercised by CI. What a real `TCC` GPU would show beyond that is a
   `ROADMAP.md` item for a rented field check.
+- **That field check ran the same day**, on an OVHcloud Tesla V100 in `TCC` mode
+  ([report](dogfooding-feedbacks/dogfooding-windows-tcc-field-check.md), kit in
+  `tools/tcc-field-check`). The rule holds over the real `DXGI` zero: the fake `NVML` at code 18
+  exits `2`, codes 9 and 28 read as no GPU. A card disabled in Device Manager reads as no GPU too
+  (`NVML` says its driver is not loaded), so the `dxgi_count_stands` comment, which said it keeps
+  `NVML`'s error, was corrected (`d6f5e29`). Its two findings, full-path names on the
+  `nvidia-smi` fallback and spill reading `?` where it cannot exist, change output and wait for
+  v0.2.16 in `ROADMAP.md`.
 
 ---
 

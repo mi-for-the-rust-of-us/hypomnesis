@@ -279,19 +279,29 @@ Items that *might* land, gated on real consumer demand:
   that is not a process row as a failure would close it, but could trip on normal output nobody
   here can produce. Un-gated by real `nvidia-smi` output for a lost GPU, which issue #4's open
   lost-GPU check asks for.
-- **Datacenter GPUs in `TCC` mode on Windows, never run** (surfaced while porting the fake NVML to
-  Windows for v0.2.15) — a `TCC` GPU is not a `WDDM` device, so `DXGI` and the `PDH` counters do not
-  see it, and only `NVML` and `nvidia-smi` do. The fake NVML covers what `hmn` decides from that
-  view (v0.2.15's broken-`NVML` rule), but three paths have never met a real `TCC` GPU:
-  - `hmn ps` lists through `PDH` on Windows, and `NVML`'s process listing is read on Linux only
-    (it is gated off Windows because of the `R570` `WDDM` sentinel bug), so on a `TCC` GPU the
-    listing rests on the `nvidia-smi` fallback;
-  - `device_info` takes the name of the `DXGI` NVIDIA adapter with the same index, which on a box
-    mixing a `WDDM` and a `TCC` GPU may not be the same GPU;
-  - spill should read as not measurable.
-
-  Un-gated by a field check on a rented Windows `TCC` box (a T4 runs in `TCC` with NVIDIA's
-  datacenter driver; `nvidia-smi -dm` switches the mode, after a reboot), in the style of issue #4.
+- ~~**Datacenter GPUs in `TCC` mode on Windows, never run**~~ — *Run on 2026-10-27*, on a rented
+  OVHcloud Tesla V100 (driver 582.70, Windows Server 2022), with
+  [`tools/tcc-field-check`](tools/tcc-field-check)
+  ([report](docs/dogfooding-feedbacks/dogfooding-windows-tcc-field-check.md)). `hmn`, `hmn ps` and
+  `hmn watch` read the card through `NVML` and the `nvidia-smi` fallback, to the MiB of
+  `nvidia-smi`; spill reads as not measurable; and over the real `DXGI` zero a broken (fake) `NVML`
+  exits `2`, as v0.2.15 decided. Its two findings are the next two items. Still never run: a box
+  mixing a `WDDM` and a `TCC` GPU, where `device_info` names a device after the `DXGI` NVIDIA
+  adapter with the same index, which may be another GPU, and a card in Code 43.
+- **Spill on a `TCC` GPU reads `?` and a `PDH error`, where it cannot exist** (surfaced by the
+  Windows `TCC` field check, request 1) — a `TCC` GPU is not paged by `WDDM`, so spill does not
+  exist there, as on Linux and macOS, where the SPILL and `PAGED` cells read `n/a`. On the V100
+  they read `?`, the cell for "could not measure now", and `hmn watch` and `hmn spill` print
+  `spill tracking unavailable (PDH error: no NVIDIA adapter at device_index 0 (DXGI walk))`, which
+  reads as a fault. `NVML`'s `nvmlDeviceGetDriverModel` (Windows only) says `TCC`; with it the cells
+  would read `n/a` and the message would say spill does not apply. It changes `hmn`'s output, so
+  it waits for its own release; un-gated as a v0.2.16 candidate.
+- **Process names on the `nvidia-smi` fallback are full paths on Windows** (surfaced by the
+  Windows `TCC` field check, request 2) — `nvidia-smi --query-compute-apps` prints
+  `C:\Users\…\holder-a.exe` where the `PDH` path names `holder-a.exe`, so on a `TCC` GPU the NAME
+  column widens by the path and `--filter` can match a folder. Naming the PID through
+  `pdh::name_from_pid_windows`, else the file-name part, would make the two paths agree. Whether
+  Linux's `nvidia-smi` prints paths too is unmeasured. Un-gated as a v0.2.16 candidate.
 
 ---
 

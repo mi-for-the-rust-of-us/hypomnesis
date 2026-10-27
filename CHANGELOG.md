@@ -108,7 +108,9 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   compiler fails the tests instead of skipping them. On Windows the same fake is `nvml.dll`, built
   with `clang` and placed beside a copy of `hmn.exe`; a host without an NVIDIA driver, the windows
   CI runner included, sees it as `DXGI` sees a `TCC` datacenter GPU, so the tests that need no
-  process listing run there too and pin the `TCC` case. From the review of the v0.2.14 Linux field check
+  process listing run there too and pin the `TCC` case. A field check on a rented Tesla V100 in
+  `TCC` mode confirmed it over a real `DXGI` zero
+  ([report](docs/dogfooding-feedbacks/dogfooding-windows-tcc-field-check.md)). From the review of the v0.2.14 Linux field check
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6; items 1
   and 4 (the fake NVML) of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 
