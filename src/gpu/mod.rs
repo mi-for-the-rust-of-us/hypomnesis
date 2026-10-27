@@ -132,7 +132,10 @@ fn backend_count() -> std::result::Result<u32, Option<String>> {
 /// datacenter GPU in `TCC` mode is invisible to it, and a broken `NVML`
 /// over such a GPU may hide running jobs. The broken `NVML`'s error stands
 /// then ("can't tell"), not a count of zero ("no GPU"); a card in an error
-/// state (Code 43, disabled) gets the same, which says it is in trouble.
+/// state (Code 43) should get the same, which says it is in trouble (not
+/// measured). A card disabled in Device Manager does not: `NVML` reports
+/// its driver not loaded (measured on a Tesla V100 in `TCC` mode), so it
+/// reads as no GPU, rightly, since no process can run on it.
 #[cfg(any(all(windows, feature = "dxgi"), test))]
 #[must_use]
 const fn dxgi_count_stands(count: u32, nvml_broken: bool) -> bool {
