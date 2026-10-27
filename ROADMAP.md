@@ -279,6 +279,19 @@ Items that *might* land, gated on real consumer demand:
   that is not a process row as a failure would close it, but could trip on normal output nobody
   here can produce. Un-gated by real `nvidia-smi` output for a lost GPU, which issue #4's open
   lost-GPU check asks for.
+- **Datacenter GPUs in `TCC` mode on Windows, never run** (surfaced while porting the fake NVML to
+  Windows for v0.2.15) — a `TCC` GPU is not a `WDDM` device, so `DXGI` and the `PDH` counters do not
+  see it, and only `NVML` and `nvidia-smi` do. The fake NVML covers what `hmn` decides from that
+  view (v0.2.15's broken-`NVML` rule), but three paths have never met a real `TCC` GPU:
+  - `hmn ps` lists through `PDH` on Windows, and `NVML`'s process listing is read on Linux only
+    (it is gated off Windows because of the `R570` `WDDM` sentinel bug), so on a `TCC` GPU the
+    listing rests on the `nvidia-smi` fallback;
+  - `device_info` takes the name of the `DXGI` NVIDIA adapter with the same index, which on a box
+    mixing a `WDDM` and a `TCC` GPU may not be the same GPU;
+  - spill should read as not measurable.
+
+  Un-gated by a field check on a rented Windows `TCC` box (a T4 runs in `TCC` with NVIDIA's
+  datacenter driver; `nvidia-smi -dm` switches the mode, after a reboot), in the style of issue #4.
 
 ---
 

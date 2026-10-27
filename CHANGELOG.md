@@ -105,7 +105,10 @@ Linux CI run these multi-GPU paths with no GPU. Plan:
   nine NVML calls the crate makes from environment variables (devices, lost devices, process rows,
   and the init and count return codes; here `nvmlInit_v2` returns 18), loads it through
   `LD_LIBRARY_PATH` with no `nvidia-smi` on `PATH`, and so touches no GPU; on CI a missing C
-  compiler fails the tests instead of skipping them. From the review of the v0.2.14 Linux field check
+  compiler fails the tests instead of skipping them. On Windows the same fake is `nvml.dll`, built
+  with `clang` and placed beside a copy of `hmn.exe`; a host without an NVIDIA driver, the windows
+  CI runner included, sees it as `DXGI` sees a `TCC` datacenter GPU, so the tests that need no
+  process listing run there too and pin the `TCC` case. From the review of the v0.2.14 Linux field check
   ([issue #4](https://github.com/mi-for-the-rust-of-us/hypomnesis/issues/4)), finding 6; items 1
   and 4 (the fake NVML) of [`docs/roadmap-v0.2.15.md`](docs/roadmap-v0.2.15.md).
 

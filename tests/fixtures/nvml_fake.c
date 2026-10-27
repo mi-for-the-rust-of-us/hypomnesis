@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0 */
 
-/* A fake libnvidia-ml.so.1 for tests/cli_fake_nvml.rs: it exports the nine
- * NVML symbols hypomnesis resolves and answers them from environment
- * variables, read again on every call, so a test describes the GPUs it
- * wants without touching one. It loads no real NVML.
+/* A fake NVML for tests/cli_fake_nvml.rs, built as libnvidia-ml.so.1 on
+ * Linux and as nvml.dll on Windows: it exports the nine NVML symbols
+ * hypomnesis resolves and answers them from environment variables, read
+ * again on every call, so a test describes the GPUs it wants without
+ * touching one. It loads no real NVML.
  *
  *   FAKE_NVML_INIT=<code>     nvmlInit_v2's return code (default 0); 18 is
  *                             NVML_ERROR_LIB_RM_VERSION_MISMATCH, a driver
@@ -25,6 +26,15 @@
  * entry in FAKE_NVML_DEVICES (`"A,"`) is a device with an empty name. The
  * structs match the repr(C) layouts in src/gpu/nvml.rs, pinned by the
  * _Static_asserts below. */
+
+/* On Windows the fake is nvml.dll, whose functions must be exported; the
+ * MSVC runtime also flags getenv and friends unless told not to. */
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#define NVML_API __declspec(dllexport)
+#else
+#define NVML_API
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -192,15 +202,15 @@ static uint64_t process_bytes(unsigned index) {
     return sum;
 }
 
-unsigned nvmlInit_v2(void) {
+NVML_API unsigned nvmlInit_v2(void) {
     return code_from_env("FAKE_NVML_INIT");
 }
 
-unsigned nvmlShutdown(void) {
+NVML_API unsigned nvmlShutdown(void) {
     return NVML_SUCCESS;
 }
 
-unsigned nvmlDeviceGetCount_v2(unsigned *count) {
+NVML_API unsigned nvmlDeviceGetCount_v2(unsigned *count) {
     unsigned code = code_from_env("FAKE_NVML_COUNT");
     struct device devs[MAX_DEVICES];
     if (code != NVML_SUCCESS) {
@@ -213,7 +223,7 @@ unsigned nvmlDeviceGetCount_v2(unsigned *count) {
     return NVML_SUCCESS;
 }
 
-unsigned nvmlDeviceGetHandleByIndex_v2(unsigned index, nvmlDevice_t *device) {
+NVML_API unsigned nvmlDeviceGetHandleByIndex_v2(unsigned index, nvmlDevice_t *device) {
     struct device devs[MAX_DEVICES];
     unsigned count = parse_devices(devs);
     if (device == NULL || index >= count) {
@@ -226,7 +236,7 @@ unsigned nvmlDeviceGetHandleByIndex_v2(unsigned index, nvmlDevice_t *device) {
     return NVML_SUCCESS;
 }
 
-unsigned nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
+NVML_API unsigned nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
     struct device devs[MAX_DEVICES];
     unsigned index;
     if (memory == NULL || device_of(device, devs, &index) == NULL) {
@@ -238,7 +248,7 @@ unsigned nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
     return NVML_SUCCESS;
 }
 
-unsigned nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
+NVML_API unsigned nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
     struct device devs[MAX_DEVICES];
     unsigned index;
     if (memory == NULL || memory->version != MEMORY_V2_VERSION ||
@@ -252,7 +262,7 @@ unsigned nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory
     return NVML_SUCCESS;
 }
 
-unsigned nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned length) {
+NVML_API unsigned nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned length) {
     struct device devs[MAX_DEVICES];
     unsigned index;
     const struct device *d = device_of(device, devs, &index);
@@ -266,7 +276,7 @@ unsigned nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned length) {
     return NVML_SUCCESS;
 }
 
-unsigned nvmlSystemGetDriverVersion(char *version, unsigned length) {
+NVML_API unsigned nvmlSystemGetDriverVersion(char *version, unsigned length) {
     if (version == NULL) {
         return NVML_ERROR_INVALID_ARGUMENT;
     }
@@ -280,7 +290,7 @@ unsigned nvmlSystemGetDriverVersion(char *version, unsigned length) {
 /* NVML's contract: with *count smaller than the rows, set *count to the
  * rows and return NVML_ERROR_INSUFFICIENT_SIZE; otherwise write the rows and
  * set *count to how many were written. */
-unsigned nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device, unsigned *count,
+NVML_API unsigned nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device, unsigned *count,
                                                   nvmlProcessInfo_t *infos) {
     struct device devs[MAX_DEVICES];
     struct proc procs[MAX_PROCS];

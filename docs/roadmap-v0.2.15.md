@@ -299,6 +299,21 @@ Raised by the audit after the last item, decided by the maintainer on 2026-10-26
   it read as "no GPU" while its jobs ran. A positive `DXGI` count still answers. A machine with one
   `WDDM` and one `TCC` GPU, where `DXGI` counts one, is left as it was.
 
+Decided on 2026-10-27, after the consistency pass:
+
+- **The fake NVML runs on Windows too, so CI tests the `TCC` rule end to end.** Built as `nvml.dll`
+  with `clang` (it finds the MSVC headers without a developer shell) and placed beside a copy of
+  `hmn.exe`, since Windows looks for a DLL in the executable's folder first. On a host without an
+  NVIDIA driver, the windows CI runner included, `DXGI` counts zero NVIDIA adapters, which is how
+  it sees a `TCC` GPU: the broken-`NVML` tests then pin the rule above, and a fake device is a
+  `TCC` GPU as `hmn` sees it. A host with a real driver skips them, because `DXGI` sees its
+  adapters and `nvidia-smi.exe` in `System32` is reachable whatever `PATH` says. The tests that
+  need `NVML`'s process listing, read on Linux only, stay Linux-only. Checked locally with a build
+  that has no `DXGI`, `PDH` or `nvidia-smi` (so no GPU is touched): the copy loads the fake, not
+  the driver's `nvml.dll`, and every scenario prints what the tests expect; the runner's own
+  `DXGI` zero is first exercised by CI. What a real `TCC` GPU would show beyond that is a
+  `ROADMAP.md` item for a rented field check.
+
 ---
 
 ## At release
