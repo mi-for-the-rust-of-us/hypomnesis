@@ -1004,6 +1004,10 @@ mod tests {
         assert!(
             matches!(no_count_error(Some(HypomnesisError::Nvml(detail.to_owned()))), HypomnesisError::Nvml(ref s) if s == detail)
         );
+        assert!(matches!(
+            no_count_error(Some(HypomnesisError::Rocm("boom".to_owned()))),
+            HypomnesisError::Rocm(ref s) if s == "boom"
+        ));
     }
 
     #[test]
@@ -1034,6 +1038,10 @@ mod tests {
         assert!(matches!(
             bounds_verdict(0, Err(Some(HypomnesisError::Nvml("boom".to_owned())))),
             Err(HypomnesisError::Nvml(ref s)) if s == "boom"
+        ));
+        assert!(matches!(
+            bounds_verdict(0, Err(Some(HypomnesisError::Rocm("boom".to_owned())))),
+            Err(HypomnesisError::Rocm(ref s)) if s == "boom"
         ));
     }
 

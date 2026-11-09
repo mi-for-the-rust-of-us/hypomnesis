@@ -118,6 +118,8 @@ pub enum GpuQuerySource {
     NvidiaSmi,
     /// Apple Metal per-process query (`ledger(LEDGER_ENTRY_INFO_V2).graphics_footprint`).
     Metal,
+    /// AMD `ROCm` SMI (`librocm_smi64`), Linux.
+    Rocm,
 }
 
 /// One process holding GPU memory on a given device.
