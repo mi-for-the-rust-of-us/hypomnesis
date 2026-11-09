@@ -55,6 +55,17 @@ pub enum HypomnesisError {
     #[error("NVML error: {0}")]
     Nvml(String),
 
+    /// The `ROCm` SMI library (`librocm_smi64`) loaded but could not start
+    /// or count, and no other backend reported a positive count: its init
+    /// or device-count call is missing from the library, or returned an
+    /// error. The text names the call and the return code. Unlike
+    /// [`Self::NoGpuSource`], it does not mean "no GPU here": the GPUs may
+    /// be there, unreadable. Not this error but `NoGpuSource` (or a count
+    /// of zero): a `ROCm` SMI library that does not load at all, and one
+    /// that reports no GPU.
+    #[error("ROCm error: {0}")]
+    Rocm(String),
+
     /// `DXGI` query failed (factory creation, adapter enumeration,
     /// `IDXGIAdapter3` cast, or interface call).
     #[error("DXGI error: {0}")]

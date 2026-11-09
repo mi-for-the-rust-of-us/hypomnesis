@@ -62,7 +62,7 @@ fn count_failure_line(err: &impl std::fmt::Display) -> String {
 pub fn run_summary(json: bool) -> ExitCode {
     let mut snaps = match Snapshot::all() {
         Ok(snaps) => snaps,
-        Err(e @ HypomnesisError::Nvml(_)) => {
+        Err(e @ (HypomnesisError::Nvml(_) | HypomnesisError::Rocm(_))) => {
             eprintln!("{}", count_failure_line(&e));
             return ExitCode::from(2);
         }

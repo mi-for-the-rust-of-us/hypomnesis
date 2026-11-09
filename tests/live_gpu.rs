@@ -139,8 +139,9 @@ fn process_gpu_info_returns_expected_source_per_platform() {
         // for unit tests), NVML would succeed and `is_per_process = true`.
         assert!(
             info.source == hypomnesis::GpuQuerySource::NvidiaSmi
-                || info.source == hypomnesis::GpuQuerySource::Nvml,
-            "expected NvidiaSmi or Nvml on Linux, got {:?}",
+                || info.source == hypomnesis::GpuQuerySource::Nvml
+                || info.source == hypomnesis::GpuQuerySource::Rocm,
+            "expected NvidiaSmi, Nvml or Rocm on Linux, got {:?}",
             info.source
         );
     }
@@ -256,6 +257,7 @@ fn gpu_processes_succeeds_on_live_host() {
                     | hypomnesis::GpuQuerySource::Pdh
                     | hypomnesis::GpuQuerySource::Metal
                     | hypomnesis::GpuQuerySource::NvidiaSmi
+                    | hypomnesis::GpuQuerySource::Rocm
             ),
             "unexpected source {:?} for gpu_processes row",
             row.source
