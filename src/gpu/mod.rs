@@ -89,14 +89,14 @@ pub fn device_count() -> Result<u32> {
 
 /// The first device count a backend reports, in [`device_count`]'s
 /// priority order (`Metal` on macOS, then `NVML`, then `DXGI` on Windows),
-/// or, when none does, `NVML`'s failure detail if its library loaded but
-/// could not start or count (`None` when `NVML` is absent or not
-/// compiled in). [`device_count`] and [`bounds_check`] both walk the
+/// or, when none does, the error of a backend whose library loaded but
+/// could not start or count (`None` when none did, or none is compiled
+/// in). Today only `NVML` can fail this way: [`HypomnesisError::Nvml`]. [`device_count`] and [`bounds_check`] both walk the
 /// backends through here, so the bound an index is checked against is the
 /// count `hmn` shows. A `DXGI` count of zero does not stand in for a broken
 /// `NVML` ([`dxgi_count_stands`]).
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
-fn backend_count() -> std::result::Result<u32, Option<String>> {
+fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     if let Some(count) = metal::device_count() {
         return Ok(count);
@@ -106,10 +106,10 @@ fn backend_count() -> std::result::Result<u32, Option<String>> {
     let nvml_failure = match nvml::device_count() {
         nvml::NvmlCount::Counted(count) => return Ok(count),
         nvml::NvmlCount::Absent => None,
-        nvml::NvmlCount::Broken(detail) => Some(detail),
+        nvml::NvmlCount::Broken(detail) => Some(HypomnesisError::Nvml(detail)),
     };
     #[cfg(not(feature = "nvml"))]
-    let nvml_failure: Option<String> = None;
+    let nvml_failure: Option<HypomnesisError> = None;
 
     #[cfg(all(windows, feature = "dxgi"))]
     if let Some(count) = dxgi::device_count()
@@ -142,13 +142,13 @@ const fn dxgi_count_stands(count: u32, nvml_broken: bool) -> bool {
     count > 0 || !nvml_broken
 }
 
-/// The error for "no backend reported a count": [`HypomnesisError::Nvml`]
-/// with `NVML`'s detail when its library loaded but could not start or
-/// count, else [`HypomnesisError::NoGpuSource`] (see [`device_count`] for
-/// what each means to a caller).
+/// The error for "no backend reported a count": the backend's own error
+/// ([`HypomnesisError::Nvml`]) when its library loaded but could not start
+/// or count, else [`HypomnesisError::NoGpuSource`] (see [`device_count`]
+/// for what each means to a caller).
 #[must_use]
-fn no_count_error(nvml_failure: Option<String>) -> HypomnesisError {
-    nvml_failure.map_or(HypomnesisError::NoGpuSource, HypomnesisError::Nvml)
+fn no_count_error(backend_failure: Option<HypomnesisError>) -> HypomnesisError {
+    backend_failure.unwrap_or(HypomnesisError::NoGpuSource)
 }
 
 /// Device-wide info for a specific GPU index (`NVML`-canonical ordering).
@@ -860,13 +860,16 @@ fn bounds_check(index: u32) -> Result<()> {
 }
 
 /// The pure core of [`bounds_check`], over what [`backend_count`] found.
-fn bounds_verdict(index: u32, counted: std::result::Result<u32, Option<String>>) -> Result<()> {
+fn bounds_verdict(
+    index: u32,
+    counted: std::result::Result<u32, Option<HypomnesisError>>,
+) -> Result<()> {
     match counted {
         Ok(count) if index >= count => Err(HypomnesisError::DeviceIndexOutOfRange { index, count }),
         // EXPLICIT: within the count, or no count source installed (the
         // caller then reports NoGpuSource).
         Ok(_) | Err(None) => Ok(()),
-        Err(Some(detail)) => Err(HypomnesisError::Nvml(detail)),
+        Err(Some(failure)) => Err(failure),
     }
 }
 
@@ -999,7 +1002,7 @@ mod tests {
         assert!(matches!(no_count_error(None), HypomnesisError::NoGpuSource));
         let detail = "nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)";
         assert!(
-            matches!(no_count_error(Some(detail.to_owned())), HypomnesisError::Nvml(ref s) if s == detail)
+            matches!(no_count_error(Some(HypomnesisError::Nvml(detail.to_owned()))), HypomnesisError::Nvml(ref s) if s == detail)
         );
     }
 
@@ -1029,7 +1032,7 @@ mod tests {
         assert!(bounds_verdict(0, Err(None)).is_ok());
         // NVML loaded but broken: its detail, not the caller's NoGpuSource.
         assert!(matches!(
-            bounds_verdict(0, Err(Some("boom".to_owned()))),
+            bounds_verdict(0, Err(Some(HypomnesisError::Nvml("boom".to_owned())))),
             Err(HypomnesisError::Nvml(ref s)) if s == "boom"
         ));
     }
