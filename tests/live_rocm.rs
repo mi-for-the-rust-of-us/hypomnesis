@@ -53,12 +53,25 @@ fn reserved_bytes_is_none() {
     );
 }
 
+/// `process_gpu_info` has two documented outcomes on an AMD host:
+///
+/// - **No compute context**: the dispatcher reads the caller's own PID with
+///   `rsmi_compute_process_info_by_device_get`. A vanilla test binary has no
+///   compute context, so the call finds nothing, and since `ROCm SMI` has no
+///   device-wide fallback the result is `Err(HypomnesisError::NoGpuSource)`.
+/// - **Compute context held**: `Ok` with `source = Rocm` and
+///   `is_per_process = true`.
 #[test]
 #[ignore = "requires AMD GPU + ROCm"]
-#[allow(clippy::expect_used)]
-fn source_is_rocm() {
-    let info = process_gpu_info(0).expect("process_gpu_info(0) requires AMD GPU + ROCm");
-    assert_eq!(info.source, GpuQuerySource::Rocm);
+fn process_gpu_info_is_per_process_rocm_or_no_source() {
+    let result = process_gpu_info(0);
+    assert!(
+        matches!(
+            &result,
+            Ok(info) if info.source == GpuQuerySource::Rocm && info.is_per_process
+        ) || matches!(&result, Err(HypomnesisError::NoGpuSource)),
+        "expected a per-process Rocm reading or NoGpuSource, got {result:?}"
+    );
 }
 
 #[test]
