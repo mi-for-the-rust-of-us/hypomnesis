@@ -189,8 +189,8 @@ pub struct SummaryNotes {
     /// No `--device` was given and there was no device to list:
     /// `device_count` counted zero (a job given no GPU) or found no count
     /// source (no NVIDIA driver and no loadable `ROCm` SMI library). The
-    /// summary says so, since
-    /// `0 GPU processes found` alone would read as an idle GPU.
+    /// summary says so, since `0 GPU processes found` alone would read as
+    /// an idle GPU.
     pub no_devices: bool,
 }
 
@@ -471,10 +471,10 @@ const fn ps_exit_code(
 /// Without `--device`, the devices to try come from `device_count()`, whose
 /// two errors mean different things. `NoGpuSource` (no count source
 /// installed, as on a machine with no NVIDIA driver and no loadable `ROCm`
-/// SMI library) leaves no device to
-/// try: nothing was skipped, and the empty listing exits `0`, or `1` under
-/// `exit_status`, as a machine without GPUs should. Any other error (an
-/// `NVML` or `ROCm` SMI library that loaded but could not start or count) prints
+/// SMI library) leaves no device to try: nothing was skipped, and the empty
+/// listing exits `0`, or `1` under `exit_status`, as a machine without GPUs
+/// should. Any other error (an `NVML` or `ROCm` SMI library that loaded but
+/// could not start or count) prints
 /// `device_count_failure_line` and `ALL_DEVICES_FAILED_LINE` and exits `2`
 /// with nothing on stdout, as when every device failed: the GPUs may be
 /// there, and an empty listing would read as "idle" (since v0.2.15).

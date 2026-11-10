@@ -220,12 +220,12 @@ enum Commands {
     /// List processes holding GPU memory. On Linux: compute-only via
     /// NVML or, for an AMD GPU, `ROCm` SMI. On Windows / WDDM 2.0+:
     /// every GPU memory holder via PDH (compositor, browsers, compute,
-    /// etc.). On macOS: every
-    /// process holding `graphics_footprint` ledger bytes that the
-    /// sandbox lets it read (the sandbox, not process ownership, decides;
-    /// see README Limitations, item 9); the processes it cannot read are
-    /// counted on the summary line as unreadable. See `hmn --help`
-    /// Limitations for the full per-platform breakdown.
+    /// etc.). On macOS: every process holding `graphics_footprint`
+    /// ledger bytes that the sandbox lets it read (the sandbox, not
+    /// process ownership, decides; see README Limitations, item 9); the
+    /// processes it cannot read are counted on the summary line as
+    /// unreadable. See `hmn --help` Limitations for the full
+    /// per-platform breakdown.
     Ps {
         /// Keep only this PID. Repeatable (`--pid A --pid B`): a process
         /// matching any of them is listed — a launcher's wrapper and its

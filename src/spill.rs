@@ -728,8 +728,9 @@ impl SpillTracker {
 /// `GPU Adapter Memory` counter set registered with at least one
 /// instance (`WDDM 2.0`+); `false` on Linux (normal `CUDA` gets an
 /// OOM rather than silent paging; `NVML` has no shared-residency
-/// field, and spill is not measured for an AMD GPU either) and macOS (`UMA` — a single physical pool, nothing to
-/// spill *into*). Portable consumers can use this to skip an
+/// field, and spill is not measured for an AMD GPU either) and macOS
+/// (`UMA` — a single physical pool, nothing to spill *into*). Portable
+/// consumers can use this to skip an
 /// early-stop polling path entirely rather than polling a tracker
 /// that will never fire.
 ///
