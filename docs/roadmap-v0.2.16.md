@@ -90,11 +90,12 @@ Reading the library on the same node settled the questions the report left open:
   reaches ROCm whenever `NVML`'s call returned `None`, the fall-through chain `DXGI` already uses,
   with no new guard. The Windows-only `DXGI` and `PDH` arms are untouched, and the cfg lists that
   name Linux backends gain `rocm`.
-- **The count rule: an `NVML` count stands if it is positive; otherwise a ROCm count stands;
-  otherwise `NVML`'s zero; otherwise the first broken detail, `NVML`'s first; otherwise
-  `NoGpuSource`.** `NvmlCount::Counted(0)` used to answer at once, so on a host with an NVIDIA
-  userland and only AMD GPUs an `NVML` zero would have masked every AMD device. This is the `DXGI`
-  rule (`dxgi_count_stands`), as a pure function with its own unit tests. A broken ROCm reads as
+- **The count rule: a positive count stands, `NVML`'s first; otherwise the first broken detail,
+  `NVML`'s first; otherwise a zero; otherwise `NoGpuSource`.** `NvmlCount::Counted(0)` used to
+  answer at once, so on a host with an NVIDIA userland and only AMD GPUs an `NVML` zero would have
+  masked every AMD device. As in the `DXGI` rule (`dxgi_count_stands`), a zero never stands over a
+  broken library. ROCm is asked only when `NVML`'s count is not positive. The rule is a pure
+  function with its own unit tests. A broken ROCm reads as
   `Rocm(..)`, not `Nvml(..)`: the error carried out of the count is the backend's own.
 - **Absent, no GPU and broken follow the `NVML` classifier.** A library that does not load is
   absence. `RSMI_STATUS_SUCCESS` counts. `RSMI_STATUS_INIT_ERROR` (8) means no GPU here, the
