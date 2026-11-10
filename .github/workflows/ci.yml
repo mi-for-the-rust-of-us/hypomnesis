@@ -47,7 +47,7 @@ jobs:
         run: cargo check --locked --no-default-features
 
       - name: Check (library-only feature set)
-        run: cargo check --locked --no-default-features --features nvml,dxgi,pdh
+        run: cargo check --locked --no-default-features --features nvml,rocm,dxgi,pdh
 
       - name: Clippy (defaults)
         run: cargo clippy --locked --all-targets -- -D warnings
