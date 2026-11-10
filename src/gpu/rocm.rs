@@ -141,7 +141,7 @@ fn call_failure(call: &str, code: u32) -> String {
 /// used by `rsmi_compute_process_info_get` and
 /// `rsmi_compute_process_info_by_device_get`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct RsmiProcessInfo {
     /// Process ID.
     process_id: u32,
@@ -169,6 +169,57 @@ type RsmiShutdownFn = unsafe extern "C" fn() -> u32;
 
 /// Function signature: `rsmi_num_monitor_devices(*num_devices)`.
 type RsmiNumMonitorDevicesFn = unsafe extern "C" fn(*mut u32) -> u32;
+
+/// Hard ceiling on any buffer sized from a count the `ROCm` SMI library
+/// reports: the host's process count from `rsmi_compute_process_info_get` and
+/// a process's device count from `rsmi_compute_process_gpus_get`. A defensive
+/// bound against a corrupted report claiming an implausible count, so it
+/// cannot drive an attempted multi-gigabyte heap allocation. Real systems
+/// never come close, so it never triggers in practice; above it the listing is
+/// `None`, never clamped to a partial list.
+const ROCM_MAX_REPORTED_COUNT: usize = 65_536;
+
+/// Function signature: `rsmi_dev_name_get(dv_ind, *name, len)`. `len` is a
+/// `size_t`.
+type RsmiDevNameGetFn = unsafe extern "C" fn(u32, *mut std::ffi::c_char, usize) -> u32;
+
+/// Function signature: `rsmi_dev_memory_total_get(dv_ind, mem_type, *total)`,
+/// and, with the same shape, `rsmi_dev_memory_usage_get(dv_ind, mem_type,
+/// *used)`. `mem_type` is an `rsmi_memory_type_t`, a 4-byte enum.
+type RsmiDevMemoryGetFn = unsafe extern "C" fn(u32, u32, *mut u64) -> u32;
+
+/// Function signature: `rsmi_version_str_get(component, *ver_str, len)`.
+/// System-level: no device index. `component` is an `rsmi_sw_component_t`, a
+/// 4-byte enum; `len` is a `uint32_t`.
+type RsmiVersionStrGetFn = unsafe extern "C" fn(u32, *mut std::ffi::c_char, u32) -> u32;
+
+/// Function signature: `rsmi_compute_process_info_get(*procs, *num_items)`.
+type RsmiComputeProcessInfoGetFn = unsafe extern "C" fn(*mut RsmiProcessInfo, *mut u32) -> u32;
+
+/// Function signature: `rsmi_compute_process_gpus_get(pid, *dv_indices,
+/// *num_devices)`.
+type RsmiComputeProcessGpusGetFn = unsafe extern "C" fn(u32, *mut u32, *mut u32) -> u32;
+
+/// Function signature: `rsmi_compute_process_info_by_device_get(pid, dv_ind,
+/// *proc)`.
+type RsmiComputeProcessInfoByDeviceGetFn =
+    unsafe extern "C" fn(u32, u32, *mut RsmiProcessInfo) -> u32;
+
+/// `rsmi_memory_type_t` value `RSMI_MEM_TYPE_VRAM`.
+const RSMI_MEM_TYPE_VRAM: u32 = 0;
+
+/// `rsmi_sw_component_t` value `RSMI_SW_COMP_DRIVER`.
+const RSMI_SW_COMP_DRIVER: u32 = 0;
+
+/// Buffer size for `rsmi_dev_name_get`. The header names no length; a name
+/// longer than the buffer is cut and the call returns
+/// `RSMI_STATUS_INSUFFICIENT_SIZE`.
+const ROCM_DEVICE_NAME_BUFFER_SIZE: usize = 256;
+
+/// Buffer size for `rsmi_version_str_get`. The header names no length; a
+/// version longer than the buffer is cut and the call returns
+/// `RSMI_STATUS_INSUFFICIENT_SIZE`.
+const ROCM_VERSION_BUFFER_SIZE: usize = 80;
 
 /// What a failed `rsmi_init` says about the GPUs, read from its return
 /// code by [`classify_init_failure`]. The question is whether GPU processes
@@ -347,6 +398,374 @@ pub(super) fn device_count() -> RocmCount {
     }
 }
 
+/// Combined result of a single `ROCm` SMI query for a given device index.
+///
+/// Returned by [`query`].
+pub(super) struct RocmQueryResult {
+    /// Per-process `VRAM` in bytes for the calling process on this device,
+    /// from `rsmi_compute_process_info_by_device_get`.
+    ///
+    /// `None` when that call fails.
+    pub process_used_bytes: Option<u64>,
+    /// Device-wide total `VRAM` in bytes.
+    pub device_total: u64,
+    /// Device-wide free `VRAM` in bytes: total minus used, saturating.
+    pub device_free: u64,
+    /// Device-wide used `VRAM` in bytes.
+    pub device_used: u64,
+    /// `ROCm` SMI reports no driver or firmware carve-out; always `None`.
+    pub reserved_bytes: Option<u64>,
+    /// Adapter name as reported by `rsmi_dev_name_get`,
+    /// e.g. `"AMD Instinct MI300X OAM"`.
+    /// `None` when the name query fails.
+    pub device_name: Option<String>,
+    /// Driver version string from `rsmi_version_str_get` for
+    /// `RSMI_SW_COMP_DRIVER`. System-level, not device-scoped, the same value
+    /// regardless of `idx`. `None` when the query fails.
+    pub driver_version: Option<String>,
+}
+
+/// Run a single `ROCm` SMI query session for the given device index.
+///
+/// Loads `ROCm` SMI, runs init, reads the device's `VRAM` total and used, its
+/// name, the driver version, and the calling process's `VRAM` on the device,
+/// then shuts `ROCm` SMI down before returning. Name, driver version and
+/// per-process failures are tolerated (`None`) since the device-wide figures
+/// are still useful. If the library load, init, or the `VRAM` total or used
+/// query fails, the function returns `None`.
+#[allow(unsafe_code)]
+pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
+    let session = RocmSession::start().ok()?;
+    let lib = session.lib();
+
+    // SAFETY: Loading function symbols from the ROCm SMI library. Each name
+    // matches the ROCm SMI C API exactly. The function signatures (type
+    // aliases above) match the header definitions.
+    let get_name: libloading::Symbol<'_, RsmiDevNameGetFn> =
+        unsafe { lib.get(b"rsmi_dev_name_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_total: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
+        unsafe { lib.get(b"rsmi_dev_memory_total_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_used: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
+        unsafe { lib.get(b"rsmi_dev_memory_usage_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_version: libloading::Symbol<'_, RsmiVersionStrGetFn> =
+        unsafe { lib.get(b"rsmi_version_str_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+
+    let mut device_total: u64 = 0;
+    // SAFETY: rsmi_dev_memory_total_get writes one u64 to the caller-provided
+    // pointer; RSMI_MEM_TYPE_VRAM is a valid rsmi_memory_type_t.
+    let ret = unsafe { get_total(idx, RSMI_MEM_TYPE_VRAM, &raw mut device_total) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_dev_memory_total_get(idx={idx}) returned {ret}");
+        return None;
+    }
+
+    let mut device_used: u64 = 0;
+    // SAFETY: rsmi_dev_memory_usage_get writes one u64 to the caller-provided
+    // pointer; RSMI_MEM_TYPE_VRAM is a valid rsmi_memory_type_t.
+    let ret = unsafe { get_used(idx, RSMI_MEM_TYPE_VRAM, &raw mut device_used) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_dev_memory_usage_get(idx={idx}) returned {ret}");
+        return None;
+    }
+
+    // Adapter name (best-effort; failure is non-fatal for the rest of the result).
+    let mut name_buf = [0_u8; ROCM_DEVICE_NAME_BUFFER_SIZE];
+    // SAFETY: rsmi_dev_name_get writes a null-terminated C string into
+    // name_buf, up to `len` bytes, `len` being a size_t. The buffer is
+    // stack-allocated and ROCM_DEVICE_NAME_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_name(
+            idx,
+            name_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            ROCM_DEVICE_NAME_BUFFER_SIZE,
+        )
+    };
+    let device_name = if ret == RSMI_STATUS_SUCCESS {
+        let nul_pos = name_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_buf.len());
+        // BORROW: explicit String::from_utf8_lossy + into_owned — name_buf
+        // is stack-local; we need an owned String to return.
+        name_buf
+            .get(..nul_pos)
+            .map(|slice| String::from_utf8_lossy(slice).into_owned())
+            .filter(|s| !s.is_empty())
+    } else {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_dev_name_get returned {ret}");
+        None
+    };
+
+    // Driver version (best-effort, system-level).
+    let mut version_buf = [0_u8; ROCM_VERSION_BUFFER_SIZE];
+    // CAST: usize → u32, ROCM_VERSION_BUFFER_SIZE = 80 fits in u32
+    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+    let version_len = ROCM_VERSION_BUFFER_SIZE as u32;
+    // SAFETY: rsmi_version_str_get writes a null-terminated C string into
+    // version_buf, up to `version_len` bytes, a uint32_t. The buffer is
+    // stack-allocated and ROCM_VERSION_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_version(
+            RSMI_SW_COMP_DRIVER,
+            version_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            version_len,
+        )
+    };
+    let driver_version = if ret == RSMI_STATUS_SUCCESS {
+        let nul_pos = version_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(version_buf.len());
+        // BORROW: explicit String::from_utf8_lossy + into_owned — version_buf
+        // is stack-local; we need an owned String to return.
+        version_buf
+            .get(..nul_pos)
+            .map(|slice| String::from_utf8_lossy(slice).into_owned())
+            .filter(|s| !s.is_empty())
+    } else {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_version_str_get returned {ret}");
+        None
+    };
+
+    // The calling process's VRAM on this device (best-effort).
+    let mut process_info = RsmiProcessInfo::default();
+    // SAFETY: rsmi_compute_process_info_by_device_get writes one
+    // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
+    // matches its layout (see the layout test).
+    let ret = unsafe { get_by_device(std::process::id(), idx, &raw mut process_info) };
+    let process_used_bytes = if ret == RSMI_STATUS_SUCCESS {
+        Some(process_info.vram_usage)
+    } else {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_compute_process_info_by_device_get returned {ret}");
+        None
+    };
+
+    // Every ROCm SMI call is done: end the session (rsmi_shut_down) here,
+    // before the result is assembled.
+    drop(session);
+
+    let device_free = device_total.saturating_sub(device_used);
+
+    #[cfg(feature = "debug-output")]
+    eprintln!(
+        "[ROCm debug] device {idx}: total={device_total} free={device_free} used={device_used} \
+         per_process={process_used_bytes:?} name={device_name:?} driver={driver_version:?}"
+    );
+
+    Some(RocmQueryResult {
+        process_used_bytes,
+        device_total,
+        device_free,
+        device_used,
+        reserved_bytes: None,
+        device_name,
+        driver_version,
+    })
+}
+
+/// The rows of one device's process listing: `(pid, used_bytes)` for each
+/// process whose device list (`rsmi_compute_process_gpus_get`) includes
+/// `idx`, with the bytes `by_device` reports for that PID on the device
+/// (`rsmi_compute_process_info_by_device_get`).
+///
+/// The list call's own `vram_usage` is zero and the per-PID total sums every
+/// device, so neither is a figure for one device. Every PID is checked,
+/// whoever owns it. `by_device` is asked only for PIDs on the device; `None`
+/// when it fails for any of them, so a failed call is never an empty listing.
+fn rows_on_device(
+    idx: u32,
+    procs: &[(u32, Vec<u32>)],
+    by_device: impl Fn(u32) -> Option<u64>,
+) -> Option<Vec<(u32, u64)>> {
+    procs
+        .iter()
+        .filter(|(_, devices)| devices.contains(&idx))
+        .map(|&(pid, _)| by_device(pid).map(|bytes| (pid, bytes)))
+        .collect()
+}
+
+/// Enumerate every compute process on the given device, returning
+/// `(pid, used_bytes)` for each process that uses it.
+///
+/// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
+/// whatever its owner or device, with `vram_usage` zero. For each PID,
+/// `rsmi_compute_process_gpus_get` says which devices it uses, and
+/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
+/// ([`rows_on_device`]).
+///
+/// Both list calls follow the library's two-call size protocol: a null buffer
+/// returns the count, then a buffer of that many entries is filled.
+///
+/// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
+/// not resolve, any call fails (the device count's included), or `idx` is not
+/// below the device count; never an empty `Vec` for a failed call.
+#[allow(unsafe_code)]
+#[must_use]
+pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
+    let session = RocmSession::start().ok()?;
+    let lib = session.lib();
+
+    // SAFETY: symbol names match the ROCm SMI C API.
+    let get_processes: libloading::Symbol<'_, RsmiComputeProcessInfoGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_gpus: libloading::Symbol<'_, RsmiComputeProcessGpusGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_gpus_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_count: libloading::Symbol<'_, RsmiNumMonitorDevicesFn> =
+        unsafe { lib.get(b"rsmi_num_monitor_devices\0") }.ok()?;
+
+    // The process list is host-wide, so an index past the devices would read
+    // as an empty device: it is `None`, as NVML's listing is when its handle
+    // lookup fails.
+    let mut devices_present: u32 = 0;
+    // SAFETY: rsmi_num_monitor_devices writes one u32 to the caller-provided
+    // pointer.
+    let ret = unsafe { get_count(&raw mut devices_present) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_num_monitor_devices returned {ret}");
+        return None;
+    }
+    if idx >= devices_present {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] device {idx} is not below the {devices_present} devices");
+        return None;
+    }
+
+    // ---- Every PID on the host: size call, then the fill call -------------
+    let mut count: u32 = 0;
+    // SAFETY: with a null buffer, rsmi_compute_process_info_get writes only
+    // the number of processes to `count`.
+    let ret = unsafe { get_processes(std::ptr::null_mut(), &raw mut count) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_compute_process_info_get(size) returned {ret}");
+        return None;
+    }
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    // CAST: u32 → usize, ROCm SMI process count; usize >= 32 bits everywhere
+    #[allow(clippy::as_conversions)]
+    let needed = count as usize;
+    if needed > ROCM_MAX_REPORTED_COUNT {
+        #[cfg(feature = "debug-output")]
+        eprintln!(
+            "[ROCm debug] rsmi_compute_process_info_get reported {needed} processes, \
+             above {ROCM_MAX_REPORTED_COUNT}"
+        );
+        return None;
+    }
+    let mut infos = vec![RsmiProcessInfo::default(); needed];
+    // SAFETY: rsmi_compute_process_info_get fills `infos` with up to `count`
+    // entries and updates `count` to the number written. The buffer holds
+    // exactly the `count` entries the size call reported.
+    let ret = unsafe { get_processes(infos.as_mut_ptr(), &raw mut count) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_compute_process_info_get returned {ret}");
+        return None;
+    }
+    // CAST: u32 → usize, bounded by the buffer's own length below.
+    #[allow(clippy::as_conversions)]
+    let written = (count as usize).min(infos.len());
+
+    // ---- The devices each PID uses: size call, then the fill call ---------
+    let procs = infos
+        .get(..written)?
+        .iter()
+        .map(|info| {
+            let pid = info.process_id;
+            let mut num_devices: u32 = 0;
+            // SAFETY: with a null buffer, rsmi_compute_process_gpus_get
+            // writes only the number of devices to `num_devices`.
+            let ret = unsafe { get_gpus(pid, std::ptr::null_mut(), &raw mut num_devices) };
+            if ret != RSMI_STATUS_SUCCESS {
+                #[cfg(feature = "debug-output")]
+                eprintln!(
+                    "[ROCm debug] rsmi_compute_process_gpus_get(size, pid={pid}) returned {ret}"
+                );
+                return None;
+            }
+            if num_devices == 0 {
+                return Some((pid, Vec::new()));
+            }
+            // CAST: u32 → usize, ROCm SMI device count; usize >= 32 bits everywhere
+            #[allow(clippy::as_conversions)]
+            let needed_devices = num_devices as usize;
+            if needed_devices > ROCM_MAX_REPORTED_COUNT {
+                #[cfg(feature = "debug-output")]
+                eprintln!(
+                    "[ROCm debug] rsmi_compute_process_gpus_get(pid={pid}) reported \
+                     {needed_devices} devices, above {ROCM_MAX_REPORTED_COUNT}"
+                );
+                return None;
+            }
+            let mut devices = vec![0_u32; needed_devices];
+            // SAFETY: rsmi_compute_process_gpus_get fills `devices` with up
+            // to `num_devices` indices and updates `num_devices` to the
+            // number written. The buffer holds exactly the count the size
+            // call reported.
+            let ret = unsafe { get_gpus(pid, devices.as_mut_ptr(), &raw mut num_devices) };
+            if ret != RSMI_STATUS_SUCCESS {
+                #[cfg(feature = "debug-output")]
+                eprintln!("[ROCm debug] rsmi_compute_process_gpus_get(pid={pid}) returned {ret}");
+                return None;
+            }
+            // CAST: u32 → usize, bounded by the buffer's own length via truncate.
+            #[allow(clippy::as_conversions)]
+            devices.truncate(num_devices as usize);
+            Some((pid, devices))
+        })
+        .collect::<Option<Vec<(u32, Vec<u32>)>>>()?;
+
+    // ---- Each PID's bytes on this device ----------------------------------
+    let rows = rows_on_device(idx, &procs, |pid| {
+        let mut process_info = RsmiProcessInfo::default();
+        // SAFETY: rsmi_compute_process_info_by_device_get writes one
+        // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
+        // matches its layout (see the layout test).
+        let ret = unsafe { get_by_device(pid, idx, &raw mut process_info) };
+        if ret == RSMI_STATUS_SUCCESS {
+            Some(process_info.vram_usage)
+        } else {
+            #[cfg(feature = "debug-output")]
+            eprintln!(
+                "[ROCm debug] rsmi_compute_process_info_by_device_get(pid={pid}, idx={idx}) \
+                 returned {ret}"
+            );
+            None
+        }
+    });
+
+    // End the session (rsmi_shut_down) only now that every call is done.
+    drop(session);
+
+    #[cfg(feature = "debug-output")]
+    eprintln!(
+        "[ROCm debug] list_compute_processes(idx={idx}): {} PID(s) on the host, {} on the device",
+        procs.len(),
+        rows.as_ref().map_or(0, Vec::len)
+    );
+
+    rows
+}
+
 // -----------------------------------------------------------------------
 // Tests (pure, no FFI)
 // -----------------------------------------------------------------------
@@ -489,5 +908,31 @@ mod tests {
                 "code {code}"
             );
         }
+    }
+
+    #[test]
+    fn rows_on_device_reports_the_device_figure() {
+        // A process on devices 0 and 1; the row carries the by-device figure.
+        let procs = [(4242, vec![0, 1])];
+        let rows = rows_on_device(1, &procs, |pid| (pid == 4242).then_some(2_298_515_456));
+        assert_eq!(rows, Some(vec![(4242, 2_298_515_456)]));
+    }
+
+    #[test]
+    fn rows_on_device_excludes_a_process_on_another_device() {
+        // One process on device 1, one whose device list lacks it: only the
+        // first is kept, whoever owns either.
+        let procs = [(4242, vec![0, 1]), (4343, vec![0])];
+        let rows = rows_on_device(1, &procs, |_| Some(2_298_515_456));
+        assert_eq!(rows, Some(vec![(4242, 2_298_515_456)]));
+    }
+
+    #[test]
+    fn rows_on_device_is_none_when_a_device_read_fails() {
+        // A failed read for a process on the device is a failed listing, not
+        // a listing without that process.
+        let procs = [(4242, vec![1]), (4343, vec![1])];
+        let rows = rows_on_device(1, &procs, |pid| (pid == 4242).then_some(2_298_515_456));
+        assert_eq!(rows, None);
     }
 }
