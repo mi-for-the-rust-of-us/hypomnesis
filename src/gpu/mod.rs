@@ -26,6 +26,9 @@ use crate::GpuQuerySource;
 #[cfg(feature = "nvml")]
 mod nvml;
 
+#[cfg(all(target_os = "linux", feature = "rocm"))]
+mod rocm;
+
 #[cfg(all(windows, feature = "dxgi"))]
 mod dxgi;
 

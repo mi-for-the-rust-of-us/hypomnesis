@@ -51,8 +51,9 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
 objc2 = { version = "0.6", optional = true }
 
 [features]
-default = ["nvml", "nvidia-smi-fallback", "dxgi", "pdh", "metal", "cli"]
+default = ["nvml", "rocm", "nvidia-smi-fallback", "dxgi", "pdh", "metal", "cli"]
 nvml = ["dep:libloading"]
+rocm = ["dep:libloading"]
 nvidia-smi-fallback = []
 dxgi = ["dep:windows"]
 # `pdh` (Windows-only effect) reads `\GPU Process Memory(*)\Dedicated Usage`
