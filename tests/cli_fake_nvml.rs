@@ -182,6 +182,18 @@ impl FakeNvml {
         #[cfg(windows)]
         std::fs::copy(env!("CARGO_BIN_EXE_hmn"), fake.lib().join("hmn.exe"))
             .expect("failed to copy hmn.exe beside the fake");
+
+        // With the fake reporting no driver, `hmn` must see no GPU: one it
+        // still counts belongs to a real ROCm stack (Linux; on Windows the
+        // real-driver check above stands).
+        #[cfg(target_os = "linux")]
+        {
+            let probe = fake.hmn(&[], &[("FAKE_NVML_INIT", "9")]);
+            if probe.stdout.lines().any(|line| line.starts_with("GPU ")) {
+                skip(test, "a real ROCm stack answers on this host");
+                return None;
+            }
+        }
         Some(fake)
     }
 
