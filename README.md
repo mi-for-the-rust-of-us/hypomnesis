@@ -578,7 +578,7 @@ On Linux, `hmn` and the library read AMD GPUs through `ROCm SMI` (the default `r
 | Device-wide GPU memory | `NVML` (`libnvidia-ml.so.1`) | `ROCm SMI` (`librocm_smi64.so.1`): name, total, used, free |
 | Device reserved memory | `NVML` v2 (R510+) | n/a (`None` — `ROCm SMI` reports no carve-out figure) |
 | Driver version | `NVML` (`nvmlSystemGetDriverVersion`) + `nvidia-smi` fallback | `ROCm SMI` (`rsmi_version_str_get`), no fallback |
-| Per-process GPU memory | `NVML` (`nvmlDeviceGetComputeRunningProcesses`) | `ROCm SMI` (`rsmi_compute_process_info_by_device_get`) |
+| Per-process GPU memory | `NVML` (`nvmlDeviceGetComputeRunningProcesses`); the caller is listed only with a `CUDA` context, otherwise the `nvidia-smi` fallback gives the device-wide figure | `ROCm SMI` (`rsmi_compute_process_info_by_device_get`); only with a compute context, otherwise no per-process value (`process_gpu_info` returns `NoGpuSource`, `Snapshot::gpu` is `None`), as there is no fallback |
 | GPU-process listing (other PIDs) | `NVML` + `/proc/<pid>/comm` (compute-only) | `ROCm SMI` (`rsmi_compute_process_info_get` + `rsmi_compute_process_gpus_get`) + `/proc/<pid>/comm` (compute-only) |
 | Process existence (`process_exists`) | `/proc/<pid>/status` (no `unsafe`) | same `/proc` path |
 | Process name (`process_name`) | `/proc/<pid>/comm`, extended past its 15-byte cut | same `/proc` path |
@@ -596,7 +596,7 @@ Every `hmn` command reads GPUs only through the library, so each works on AMD wi
 | `hmn fits <SIZE>` | `device_info` free bytes | exit `0` / `1` / `2` on the device's free `VRAM` | yes |
 | `hmn` and `hmn ps` on a library that loads but fails | `HypomnesisError::Rocm` | both exit `2` with `ROCm error: …` on stderr and nothing on stdout | yes |
 
-The `--json` `source` field reads `Rocm` where it reads `Nvml` for NVIDIA. A host with AMD GPUs and an NVIDIA userland counts the AMD GPUs: an `NVML` count that is positive stands, otherwise a `ROCm SMI` count does.
+The library's `source` field (`GpuProcessEntry::source`, `ProcessGpuInfo::source`) reads `GpuQuerySource::Rocm` where it reads `GpuQuerySource::Nvml` for NVIDIA; the `hmn` JSON output does not carry it. A host with AMD GPUs and an NVIDIA userland counts the AMD GPUs: an `NVML` count that is positive stands, otherwise a `ROCm SMI` count does.
 
 Known driver bugs, AMD: none known. `rsmi_compute_process_info_get` returns `0` bytes for every process by the library's own contract, so the backend lists the processes with it and reads each process's bytes with a per-device query.
 

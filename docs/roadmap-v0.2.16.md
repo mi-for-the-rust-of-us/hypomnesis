@@ -26,8 +26,8 @@ Three behaviour changes are deliberate:
 
 - a Linux host with an AMD GPU and the ROCm SMI library, which v0.2.15 read as no GPU (`hmn`
   printed `no visible GPUs.` and exited `0`), is measured: `hmn` names the device, `hmn ps` lists
-  the processes with VRAM on it, and `--json` prints `Rocm` in the `source` field where it prints
-  `Nvml` today;
+  the processes with VRAM on it, and the library's `GpuQuerySource` on the per-process and listing
+  results reads `Rocm` where it reads `Nvml` today;
 - a ROCm SMI library that loads but cannot start is `HypomnesisError::Rocm`, not absence: `hmn`
   and `hmn ps` both exit `2` with the reason, the rule v0.2.15 set for `NVML`;
 - on Linux the `NoGpuSource` text reads
@@ -174,7 +174,7 @@ cgroups) ticks, or, for a library-level row, the measurement that was taken ther
 | The bytes track the device | within 1 MiB of the device's used-VRAM delta (measured: -77824, -94208 and -98304 B) |
 | The ABI is the header's | `rsmi_process_info_t` is 32 bytes at the offsets above, and `rsmi_status_t`, `rsmi_memory_type_t` and `rsmi_sw_component_t` are 4; 200 init, shutdown and `dlclose` cycles ran with no non-zero return (measured, in C) |
 | A host with the ROCm userland and no AMD driver is not broken | `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8) there (measured); `hmn` prints `no visible GPUs.` and exits `0` |
-| `hmn`, `hmn --json` | names the GPU, total, used and free, and the driver version; shows no reserved parenthetical; `--json` `source` is `Rocm`; exit `0` |
+| `hmn`, `hmn --json` | names the GPU, total, used and free, and the driver version; shows no reserved parenthetical; exit `0` |
 | `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with VRAM on each device, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
 | `hmn watch` (PID, `--follow-new`, `--filter`, `--min`) | the same rows sampled over time; the spill line reads "not measurable" |
 | `hmn spill -- <cmd>` | runs the command and prints the "not measurable on this platform" note |
