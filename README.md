@@ -221,9 +221,9 @@ Example default output (single NVIDIA dGPU, the maintainer's reference machine �
 GPU 0 [NVIDIA GeForce RTX 5060 Ti]: free 13284 MiB / 16311 MiB (259 MiB reserved), driver 610.88
 ```
 
-The `(259 MiB reserved)` parenthetical (NVML R510+) is the driver/firmware carve-out *within* the 16311 MiB total — matching `nvidia-smi -q -d MEMORY`'s `Reserved` line. It is elided on backends that don't expose it (DXGI, `nvidia-smi`, Metal, pre-R510).
+The `(259 MiB reserved)` parenthetical (NVML R510+) is the driver/firmware carve-out *within* the 16311 MiB total — matching `nvidia-smi -q -d MEMORY`'s `Reserved` line. It is elided on backends that don't expose it (DXGI, `nvidia-smi`, `ROCm SMI`, Metal, pre-R510).
 
-The `, driver 610.88` suffix is the NVIDIA-branded driver version — from NVML (`nvmlSystemGetDriverVersion`) or the `nvidia-smi` fallback (`--query-gpu=driver_version`); elided on backends that don't expose it (DXGI, Metal, non-NVIDIA adapters). This is the same version string `nvidia-smi`, release notes, and bug reports use — **not** the Windows PnP driver-store form (e.g. `32.0.16.1088`), which NVML/`nvidia-smi` don't expose.
+The `, driver 610.88` suffix is the driver version — on NVIDIA GPUs the NVIDIA-branded one, from NVML (`nvmlSystemGetDriverVersion`) or the `nvidia-smi` fallback (`--query-gpu=driver_version`); on AMD GPUs on Linux the `ROCm SMI` version (`rsmi_version_str_get`); elided on backends that don't expose it (DXGI, Metal, non-NVIDIA adapters). This is the same version string `nvidia-smi`, release notes, and bug reports use — **not** the Windows PnP driver-store form (e.g. `32.0.16.1088`), which NVML/`nvidia-smi` don't expose.
 
 Apple Silicon, idle process (Apple M3 Pro, 36 GiB unified memory):
 
@@ -311,7 +311,7 @@ The stderr summary is printed even when the table is empty (except when every de
 
 6. **Pre-`WDDM 2.0` Windows falls back to `nvidia-smi --query-compute-apps`.** Vanishingly rare in 2026 — `WDDM 2.0` shipped with Windows 10 1709 (October 2017). On the fallback path, `hmn ps` is compute-only (matching the Linux semantic) and `used_memory` may be `[N/A]` under `WDDM` (parser drops those rows). The `source` field on `GpuProcessEntry` reads `GpuQuerySource::NvidiaSmi` rather than `GpuQuerySource::Pdh` on this path.
 
-7. **`R570`-class driver-bug filtering.** The `u64::MAX` sentinel (`R570` driver bug on `RTX 5060 Ti` and similar consumer GeForce cards) and the `used > total` corruption checks are applied per-row in `hmn ps`; affected rows are dropped rather than reported as garbage.
+7. **`R570`-class driver-bug filtering.** The `u64::MAX` sentinel (`R570` driver bug on `RTX 5060 Ti` and similar consumer GeForce cards) and the `used > total` corruption checks are applied per-row in `hmn ps`; affected rows are dropped rather than reported as garbage. AMD on Linux: none known (see [AMD GPUs on Linux: parity with NVIDIA](#amd-gpus-on-linux-parity-with-nvidia)).
 
 8. **macOS `used_bytes` reflects currently-resident GPU pages.** The kernel evicts idle Metal pages from a process's `graphics_footprint`, so the same PID may report different values across successive `hmn ps` calls when its working set has cooled. This is the same resident-bytes semantics as Windows `WorkingSetSize` and Linux `VmRSS` — not a macOS quirk, the cross-platform contract.
 
@@ -600,6 +600,8 @@ The library's `source` field (`GpuProcessEntry::source`, `ProcessGpuInfo::source
 
 Known driver bugs, AMD: none known. `rsmi_compute_process_info_get` returns `0` bytes for every process by the library's own contract, so the backend lists the processes with it and reads each process's bytes with a per-device query.
 
+A 4 GiB `hipMalloc` reads 4445999104 B (4 GiB plus 144 MiB) on an MI300X with `ROCm` 7.2.4, against about 518 MiB of `CUDA` context on an H200, so per-process figures carry each runtime's own context.
+
 ### macOS UMA semantics: what `free_bytes` means
 
 On a discrete GPU, `free_bytes` is "untaken bytes in the VRAM pool" — a hard number bounded by the card's physical memory. On Apple Silicon the GPU has no separate pool: it shares system DRAM via unified memory architecture (UMA). `hypomnesis` therefore reports `free_bytes` as `MTLDevice.recommendedMaxWorkingSetSize` — the kernel-projected GPU working-set budget that Apple's Metal driver itself computes, factoring in wired-page reserves, system memory pressure, and the kernel's known compression / eviction capability.
@@ -618,9 +620,9 @@ Two consequences worth noting:
 | `dxgi` | yes | Windows per-process `VRAM` via `IDXGIAdapter3` (no-op on non-Windows) |
 | `pdh` | yes | Windows foreign-process `VRAM` listing (`\GPU Process Memory(*)\Dedicated Usage` + `Shared Usage`) and the `\GPU Adapter Memory(*)` counters backing `SpillTracker`'s live path, under `WDDM 2.0`+ (no-op on non-Windows; depends on `dxgi`). `SpillTracker` itself compiles everywhere regardless — without this feature it is simply never measurable. |
 | `metal` | yes | macOS device-wide GPU budget via `objc2-metal` (`MTLDevice.recommendedMaxWorkingSetSize`); no-op on non-macOS. RAM and per-process GPU paths are libSystem-only and unaffected by this flag. |
-| `nvidia-smi-fallback` | yes | Subprocess fallback when `NVML` / `DXGI` / `PDH` fail or are otherwise unavailable (e.g. pre-`WDDM 2.0` Windows) |
+| `nvidia-smi-fallback` | yes | Subprocess fallback when `NVML` / `ROCm` SMI / `DXGI` / `PDH` fail or are otherwise unavailable (e.g. pre-`WDDM 2.0` Windows) |
 | `report` | no | `MemoryReport` delta + `print_delta` / `print_before_after` / `ram_mb` / `vram_mb` helpers (`candle-mi` parity, candidate for `candle-mi` v0.2 migration via Cargo flag flip; figures labelled `MB` are `MiB`); `format_free` / `print_free` / `format_total` / `format_used` formatting helpers on `GpuDeviceInfo` |
-| `debug-output` | no | Print raw `NVML` / `DXGI` / `PDH` / `nvidia-smi` / spill values to stderr (diagnostic) |
+| `debug-output` | no | Print raw `NVML` / `ROCm` SMI / `DXGI` / `PDH` / `nvidia-smi` / spill values to stderr (diagnostic) |
 | `cli` | yes (since v0.2.8) | Build the `hmn` CLI binary (pulls `clap` 4 and `ctrlc` as deps — the latter backs `hmn watch`'s graceful Ctrl+C summary). Library-only consumers who don't want the extra deps use `--no-default-features` and select source features explicitly. |
 | `test-helpers` | no | Expose `GpuDeviceInfoBuilder`, `GpuProcessEntryBuilder`, and `SpillReportBuilder` for downstream tests that need synthetic fixtures. Default-off, additive — production code must never enable it. |
 

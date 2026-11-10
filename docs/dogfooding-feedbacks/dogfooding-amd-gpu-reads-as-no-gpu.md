@@ -102,12 +102,16 @@ from zero. In-job, ROCm's index is canonical: the `GPU` column of `hmn ps` shoul
    trusted only because `rocm-smi --showmeminfo vram` moved by the same amount to within 80 KiB;
    an acceptance run should keep that cross-check beside `hmn`'s row.
 2. **Per-process listing looked job-scoped, and that is not proof.** `amd-smi process --json` showed
-   the caller's process and no foreign one, but no other GPU job was running on the node then. How
-   a foreign process appears under `ConstrainDevices=yes` was not measured.
+   the caller's process and no foreign one, but no other GPU job was running on the node then. An
+   acceptance run on a two-MI300X allocation listed no row for another PID, and
+   `rocm-smi --showpids` listed none either, so how a foreign process appears under
+   `ConstrainDevices=yes` was not measured.
 3. **The KFD directory lists processes, not their VRAM.** `/sys/class/kfd/kfd/proc` holds one
    directory per process; whether VRAM figures sit under it was not read.
-4. **Not covered:** an allocation of several GPUs (device indexes and one row per device), two jobs
-   sharing a node, a ROCm release other than 7.2.4, spill, and Intel GPUs.
+4. **Several GPUs were measured on a two-MI300X allocation.** `hmn ps` with one process on device 0
+   and a second on devices 0 and 1 shows one row per device, each with that device's own figure, and
+   the second process's per-device figures sum to the `rocm-smi --showpids` figure to the byte.
+   **Not covered:** two jobs sharing a node, a ROCm release other than 7.2.4, spill, and Intel GPUs.
 
 ## Acceptance fixtures (already run, free to regress against)
 
