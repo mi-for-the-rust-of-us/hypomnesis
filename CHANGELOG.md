@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Adds a `ROCm` SMI backend, so `hmn` and the library read AMD GPUs on Linux where they read an
 absent GPU before: a field check on an AMD Instinct MI300X node (`ROCm` 7.2.4) found `hmn` printing
-`hmn: no visible GPUs.` and exiting `0` beside a 4 GiB allocation that `rocm-smi` and `amd-smi`
-both read to the byte
+`hmn: no visible GPUs.` and exiting `0` beside a 4 GiB allocation, for which `rocm-smi` and `amd-smi`
+both reported the same per-process figure, 4445999104 B, within 80 KiB of the device-wide delta
 ([`docs/dogfooding-feedbacks/dogfooding-amd-gpu-reads-as-no-gpu.md`](docs/dogfooding-feedbacks/dogfooding-amd-gpu-reads-as-no-gpu.md)).
 The parity claim is Linux only and is written down row by row in the README, in
 [AMD GPUs on Linux: parity with NVIDIA](README.md#amd-gpus-on-linux-parity-with-nvidia). Plan:
@@ -47,11 +47,12 @@ The parity claim is Linux only and is written down row by row in the README, in
   source available (NVML, ROCm, and nvidia-smi all failed or are disabled)`. Windows and macOS keep
   their text, and a platform that is none of the three keeps the two-backend text. Matching on the
   variant is unaffected.
-- **The Linux device count follows a rule across `NVML` and `ROCm` SMI** (`src/gpu/mod.rs`) — an
-  `NVML` count that is positive stands; otherwise a `ROCm` SMI count does; otherwise `NVML`'s zero;
-  otherwise the first library that failed, `NVML`'s first. An NVIDIA userland on a host whose GPUs
-  are all AMD therefore does not hide them behind a count of zero. Mixed-vendor hosts are
-  unsupported.
+- **The Linux device count follows a rule across `NVML` and `ROCm` SMI** (`src/gpu/mod.rs`) — a
+  positive count stands, `NVML`'s first; otherwise the first library that failed, `NVML`'s first;
+  otherwise a zero; otherwise `NoGpuSource`. A zero never stands over a broken library, as in the
+  `DXGI` rule. `ROCm` SMI is asked only when `NVML`'s count is not positive. An NVIDIA userland on a
+  host whose GPUs are all AMD therefore does not hide them behind a count of zero. Mixed-vendor
+  hosts are unsupported.
 - **`hmn` names a failed `ROCm` count** (`src/bin/hmn/summary.rs`) — `hmn: failed to count devices:
   ROCm error: …`, as for `NVML`.
 

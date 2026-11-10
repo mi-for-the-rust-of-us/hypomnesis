@@ -570,7 +570,7 @@ The crate handles two known driver bugs out of the box:
 
 ### AMD GPUs on Linux: parity with NVIDIA
 
-On Linux, `hmn` and the library read AMD GPUs through `ROCm SMI` (the default `rocm` feature; `librocm_smi64.so.1`, loaded at run time, so a host without ROCm is unaffected) and give the same answers they give for NVIDIA GPUs. The backend is asked after `NVML` and before the `nvidia-smi` subprocess. It was tested on an AMD Instinct MI300X with `ROCm` 7.2.4; other AMD GPUs and `ROCm` releases use the same library ABI, but are not claimed as tested. Windows and macOS are unchanged: AMD GPUs on Windows go through `DXGI` / `PDH` as before, and no AMD support is claimed there.
+On Linux, `hmn` and the library read AMD GPUs through `ROCm SMI` (the default `rocm` feature; `librocm_smi64.so.1`, loaded at run time, so a host without ROCm is unaffected) and read them the way they read NVIDIA GPUs; the tables below give each row, including where AMD has no value. The backend is asked after `NVML` and before the `nvidia-smi` subprocess. It was tested on an AMD Instinct MI300X with `ROCm` 7.2.4; other AMD GPUs and `ROCm` releases use the same library ABI, but are not claimed as tested. Windows and macOS are unchanged: AMD GPUs on Windows go through `DXGI` / `PDH` as before, and no AMD support is claimed there.
 
 | Metric | NVIDIA (Linux) | AMD (Linux) |
 |--------|----------------|-------------|
