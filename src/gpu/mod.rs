@@ -17,6 +17,7 @@ use crate::{
 
 #[cfg(any(
     feature = "nvml",
+    all(target_os = "linux", feature = "rocm"),
     all(windows, feature = "dxgi"),
     all(windows, feature = "pdh"),
     feature = "nvidia-smi-fallback"
@@ -91,13 +92,16 @@ pub fn device_count() -> Result<u32> {
 }
 
 /// The first device count a backend reports, in [`device_count`]'s
-/// priority order (`Metal` on macOS, then `NVML`, then `DXGI` on Windows),
-/// or, when none does, the error of a backend whose library loaded but
-/// could not start or count (`None` when none did, or none is compiled
-/// in). Today only `NVML` can fail this way: [`HypomnesisError::Nvml`]. [`device_count`] and [`bounds_check`] both walk the
-/// backends through here, so the bound an index is checked against is the
-/// count `hmn` shows. A `DXGI` count of zero does not stand in for a broken
-/// `NVML` ([`dxgi_count_stands`]).
+/// priority order (`Metal` on macOS, then `NVML`, then `ROCm` SMI on Linux,
+/// or `DXGI` on Windows), or, when none does, the error of a backend whose
+/// library loaded but could not start or count (`None` when none did, or none
+/// is compiled in). `NVML` ([`HypomnesisError::Nvml`]) and `ROCm` SMI
+/// ([`HypomnesisError::Rocm`]) can fail this way. [`device_count`] and
+/// [`bounds_check`] both walk the backends through here, so the bound an index
+/// is checked against is the count `hmn` shows. A `DXGI` count of zero does
+/// not stand in for a broken `NVML` ([`dxgi_count_stands`]); on Linux the two
+/// counts go through [`count_verdict`], `ROCm` SMI being asked only when `NVML`'s
+/// count is not positive.
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
 fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -106,13 +110,31 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     }
 
     #[cfg(feature = "nvml")]
-    let nvml_failure = match nvml::device_count() {
-        nvml::NvmlCount::Counted(count) => return Ok(count),
-        nvml::NvmlCount::Absent => None,
-        nvml::NvmlCount::Broken(detail) => Some(HypomnesisError::Nvml(detail)),
+    let nvml_count = match nvml::device_count() {
+        nvml::NvmlCount::Counted(count) => Ok(count),
+        nvml::NvmlCount::Absent => Err(None),
+        nvml::NvmlCount::Broken(detail) => Err(Some(HypomnesisError::Nvml(detail))),
     };
     #[cfg(not(feature = "nvml"))]
-    let nvml_failure: Option<HypomnesisError> = None;
+    let nvml_count: std::result::Result<u32, Option<HypomnesisError>> = Err(None);
+
+    // ROCm SMI is asked only when NVML's count is not positive.
+    #[cfg(all(target_os = "linux", feature = "rocm"))]
+    let nvml_count = if matches!(nvml_count, Ok(count) if count > 0) {
+        nvml_count
+    } else {
+        let rocm_count = match rocm::device_count() {
+            rocm::RocmCount::Counted(count) => Ok(count),
+            rocm::RocmCount::Absent => Err(None),
+            rocm::RocmCount::Broken(detail) => Err(Some(HypomnesisError::Rocm(detail))),
+        };
+        count_verdict(nvml_count, rocm_count)
+    };
+
+    let nvml_failure = match nvml_count {
+        Ok(count) => return Ok(count),
+        Err(failure) => failure,
+    };
 
     #[cfg(all(windows, feature = "dxgi"))]
     if let Some(count) = dxgi::device_count()
@@ -126,6 +148,26 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     // adds a subprocess invocation for what's typically a metadata call.
 
     Err(nvml_failure)
+}
+
+/// The device count of the Linux backends, `NVML` and `ROCm` SMI, each given
+/// as `Ok(count)`, `Err(None)` for no usable library, or `Err(Some(error))`
+/// for a library that loaded but could not start or count. A positive count
+/// stands, `NVML`'s first. Otherwise the first broken detail stands, `NVML`'s
+/// first, so a zero never stands over a broken library from either side (the
+/// rule of [`dxgi_count_stands`]). Otherwise a zero stands, and otherwise
+/// `Err(None)`.
+#[cfg(any(all(target_os = "linux", feature = "rocm"), test))]
+fn count_verdict(
+    nvml: std::result::Result<u32, Option<HypomnesisError>>,
+    rocm: std::result::Result<u32, Option<HypomnesisError>>,
+) -> std::result::Result<u32, Option<HypomnesisError>> {
+    match (nvml, rocm) {
+        (Ok(count), _) | (_, Ok(count)) if count > 0 => Ok(count),
+        (Err(Some(failure)), _) | (_, Err(Some(failure))) => Err(Some(failure)),
+        (Ok(count), _) | (_, Ok(count)) => Ok(count),
+        (Err(None), Err(None)) => Err(None),
+    }
 }
 
 /// Whether a `DXGI` count of NVIDIA adapters may answer for the device
@@ -146,9 +188,10 @@ const fn dxgi_count_stands(count: u32, nvml_broken: bool) -> bool {
 }
 
 /// The error for "no backend reported a count": the backend's own error
-/// ([`HypomnesisError::Nvml`]) when its library loaded but could not start
-/// or count, else [`HypomnesisError::NoGpuSource`] (see [`device_count`]
-/// for what each means to a caller).
+/// ([`HypomnesisError::Nvml`] or [`HypomnesisError::Rocm`]) when its library
+/// loaded but could not start or count, the first such error on Linux where
+/// [`count_verdict`] names `NVML`'s first, else [`HypomnesisError::NoGpuSource`]
+/// (see [`device_count`] for what each means to a caller).
 #[must_use]
 fn no_count_error(backend_failure: Option<HypomnesisError>) -> HypomnesisError {
     backend_failure.unwrap_or(HypomnesisError::NoGpuSource)
@@ -225,6 +268,21 @@ pub fn device_info(index: u32) -> Result<GpuDeviceInfo> {
             // figures regardless.
             reserved_bytes: snap.reserved_bytes,
             // From nvmlSystemGetDriverVersion, read in the same NVML session.
+            driver_version: snap.driver_version,
+        });
+    }
+
+    #[cfg(all(target_os = "linux", feature = "rocm"))]
+    if let Some(snap) = rocm::query(index) {
+        return Ok(GpuDeviceInfo {
+            index,
+            name: snap.device_name,
+            total_bytes: snap.device_total,
+            free_bytes: snap.device_free,
+            used_bytes: snap.device_used,
+            // ROCm SMI reports no driver/firmware carve-out figure.
+            reserved_bytes: snap.reserved_bytes,
+            // From rsmi_version_str_get, read in the same ROCm SMI session.
             driver_version: snap.driver_version,
         });
     }
@@ -312,6 +370,17 @@ pub fn process_gpu_info(device_index: u32) -> Result<ProcessGpuInfo> {
             used_bytes: used,
             is_per_process: true,
             source: GpuQuerySource::Nvml,
+        });
+    }
+
+    #[cfg(all(target_os = "linux", feature = "rocm"))]
+    if let Some(snap) = rocm::query(device_index)
+        && let Some(used) = snap.process_used_bytes
+    {
+        return Ok(ProcessGpuInfo {
+            used_bytes: used,
+            is_per_process: true,
+            source: GpuQuerySource::Rocm,
         });
     }
 
@@ -556,6 +625,30 @@ pub fn gpu_process_listing(device_index: u32) -> Result<GpuProcessListing> {
         return Ok(listing_without_denials(entries));
     }
 
+    // ROCm SMI follows NVML on Linux: every KFD process on the host is
+    // checked, and the rows are those using this device, with their bytes
+    // there (`rocm::list_compute_processes`).
+    #[cfg(all(target_os = "linux", feature = "rocm"))]
+    if let Some(rows) = rocm::list_compute_processes(device_index) {
+        let mut entries: Vec<GpuProcessEntry> = rows
+            .into_iter()
+            .map(|(pid, used_bytes)| {
+                let name = proc_name::read_proc_name(pid);
+                GpuProcessEntry {
+                    pid,
+                    name,
+                    used_bytes,
+                    // ROCm SMI has no shared-residency counter; spill is a
+                    // WDDM concept (see GpuProcessEntry docs).
+                    shared_used_bytes: 0,
+                    source: GpuQuerySource::Rocm,
+                }
+            })
+            .collect();
+        sort_by_pid(&mut entries);
+        return Ok(listing_without_denials(entries));
+    }
+
     // PDH primary path on Windows / WDDM 2.0+. Reads VidMm-tracked
     // bytes via `\GPU Process Memory(*)\Dedicated Usage`; the only
     // path that gives real per-process numbers on consumer Windows.
@@ -636,6 +729,7 @@ fn decide_listing(
 /// process returns.
 #[cfg(any(
     all(target_os = "linux", feature = "nvml"),
+    all(target_os = "linux", feature = "rocm"),
     all(windows, feature = "pdh"),
     feature = "nvidia-smi-fallback"
 ))]
@@ -796,6 +890,7 @@ fn status_tgid(status: &str) -> Option<u32> {
 /// descending for human-facing display.
 #[cfg(any(
     all(target_os = "linux", feature = "nvml"),
+    all(target_os = "linux", feature = "rocm"),
     all(windows, feature = "pdh"),
     all(target_os = "macos", feature = "metal"),
     feature = "nvidia-smi-fallback",
@@ -1014,6 +1109,47 @@ mod tests {
     }
 
     #[test]
+    fn count_verdict_follows_the_linux_count_rule() {
+        let broken = |call: &str| Err(Some(HypomnesisError::Nvml(call.to_owned())));
+        let rocm_broken = |call: &str| Err(Some(HypomnesisError::Rocm(call.to_owned())));
+        // A positive count stands, NVML's first.
+        assert!(matches!(count_verdict(Ok(2), Ok(8)), Ok(2)));
+        assert!(matches!(count_verdict(Ok(2), Err(None)), Ok(2)));
+        assert!(matches!(count_verdict(Ok(2), rocm_broken("rocm")), Ok(2)));
+        assert!(matches!(count_verdict(Ok(0), Ok(8)), Ok(8)));
+        assert!(matches!(count_verdict(Err(None), Ok(8)), Ok(8)));
+        assert!(matches!(count_verdict(broken("nvml"), Ok(8)), Ok(8)));
+        // A zero never stands over a broken library, from either side.
+        assert!(matches!(
+            count_verdict(broken("nvml"), Ok(0)),
+            Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
+        ));
+        assert!(matches!(
+            count_verdict(Ok(0), rocm_broken("rocm")),
+            Err(Some(HypomnesisError::Rocm(ref s))) if s == "rocm"
+        ));
+        // Otherwise the first broken detail, NVML's first.
+        assert!(matches!(
+            count_verdict(broken("nvml"), rocm_broken("rocm")),
+            Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
+        ));
+        assert!(matches!(
+            count_verdict(Err(None), rocm_broken("rocm")),
+            Err(Some(HypomnesisError::Rocm(ref s))) if s == "rocm"
+        ));
+        assert!(matches!(
+            count_verdict(broken("nvml"), Err(None)),
+            Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
+        ));
+        // Otherwise a zero.
+        assert!(matches!(count_verdict(Ok(0), Ok(0)), Ok(0)));
+        assert!(matches!(count_verdict(Ok(0), Err(None)), Ok(0)));
+        assert!(matches!(count_verdict(Err(None), Ok(0)), Ok(0)));
+        // Neither library usable.
+        assert!(matches!(count_verdict(Err(None), Err(None)), Err(None)));
+    }
+
+    #[test]
     fn dxgi_count_stands_unless_it_is_zero_over_a_broken_nvml() {
         // NVML absent (no NVIDIA driver): DXGI's count answers, zero too.
         assert!(dxgi_count_stands(0, false));
@@ -1061,6 +1197,7 @@ mod tests {
 
     #[cfg(any(
         all(target_os = "linux", feature = "nvml"),
+        all(target_os = "linux", feature = "rocm"),
         all(windows, feature = "pdh"),
         feature = "nvidia-smi-fallback"
     ))]

@@ -16,8 +16,6 @@
 //! Every `rsmi_status_t` value is named here, so a failed call reports
 //! `<call> returned <RSMI_STATUS_NAME> (<code>)` ([`call_failure`]).
 
-#![allow(dead_code)]
-
 /// `ROCm` SMI return code: the call succeeded.
 const RSMI_STATUS_SUCCESS: u32 = 0;
 

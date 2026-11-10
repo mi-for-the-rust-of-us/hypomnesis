@@ -102,8 +102,8 @@ pub enum HypomnesisError {
     /// it means no count source is installed, which a caller may read as
     /// zero GPUs. The message names the platform's backends: `NVML`,
     /// `DXGI`, `PDH` and `nvidia-smi` on Windows; `Metal`, `NVML` and
-    /// `nvidia-smi` on macOS; `NVML` and `nvidia-smi` elsewhere, Linux
-    /// included (since v0.2.15; the Windows list before). On macOS,
+    /// `nvidia-smi` on macOS; `NVML`, `ROCm` SMI and `nvidia-smi` on Linux;
+    /// `NVML` and `nvidia-smi` elsewhere. On macOS,
     /// [`crate::gpu_processes`] and [`crate::gpu_process_listing`] also
     /// return it when the caller's sandbox refuses `proc_listpids` and no
     /// `sysctl` listing can stand in, for example when `KERN_PROC_ALL` is
@@ -123,7 +123,13 @@ pub enum HypomnesisError {
         )
     )]
     #[cfg_attr(
-        not(any(target_os = "macos", windows)),
+        target_os = "linux",
+        error(
+            "no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed or are disabled)"
+        )
+    )]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", windows)),
         error(
             "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"
         )
@@ -177,9 +183,14 @@ mod tests {
             text,
             "no GPU measurement source available (NVML, DXGI, PDH, and nvidia-smi all failed or are disabled)"
         );
-        // Linux, and any other platform, names only the two backends it
-        // compiles, none of the Windows-only ones.
-        #[cfg(not(any(target_os = "macos", windows)))]
+        // Linux names its three backends, none of the Windows-only ones.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            text,
+            "no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed or are disabled)"
+        );
+        // Any other platform names only the two backends it compiles.
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         assert_eq!(
             text,
             "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"
