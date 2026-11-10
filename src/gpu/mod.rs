@@ -2,9 +2,10 @@
 
 //! GPU memory measurement dispatchers and backend modules.
 //!
-//! Each backend (`nvml`, `dxgi`, `nvidia_smi`) is gated by a Cargo
-//! feature; the dispatchers below try them in priority order and surface
-//! the first success. Backend modules are crate-private — public access
+//! Each backend (`nvml`, `rocm`, `dxgi`, `nvidia_smi`) is gated by a Cargo
+//! feature; the dispatchers below try them in priority order (on Linux:
+//! `NVML`, then `ROCm` SMI, then `nvidia-smi`) and surface the first
+//! success. Backend modules are crate-private — public access
 //! is via the five dispatchers ([`device_count`], [`device_info`],
 //! [`process_gpu_info`], [`gpu_processes`], [`gpu_process_listing`]), plus
 //! [`process_exists`] (since v0.2.13) and [`process_name`] (since v0.2.15),
@@ -42,7 +43,7 @@ pub(crate) mod pdh;
 #[cfg(feature = "nvidia-smi-fallback")]
 mod nvidia_smi;
 
-// Linux names for `NVML`'s process rows and for `process_name`; see its
+// Linux names for the `NVML` and `ROCm` SMI process rows and for `process_name`; see its
 // module docs for why `comm` alone is not enough. Pure `std`, so compiled
 // on Linux whatever the features, since `process_name` always is.
 #[cfg(target_os = "linux")]
@@ -57,15 +58,24 @@ mod metal;
 #[cfg(any(all(target_os = "macos", feature = "metal"), test))]
 mod kinfo;
 
-/// Number of NVIDIA GPUs visible to `NVML` (`NVML`-canonical ordering).
+/// Number of GPUs visible to the process (`NVML`-canonical ordering).
+///
+/// NVIDIA GPUs are counted through `NVML` and, on Linux, AMD GPUs through
+/// `ROCm` SMI, whose index is the library's enumeration order over the
+/// devices visible to the process.
 ///
 /// On Windows the count uses `NVML`; if `NVML` is unavailable, the
 /// `DXGI` fallback counts NVIDIA adapters with non-zero dedicated `VRAM`.
+/// On Linux `ROCm` SMI is asked only when `NVML`'s count is not positive,
+/// and then a positive count stands, `NVML`'s first, else the first broken
+/// library's error, `NVML`'s first, else a zero, else
+/// [`HypomnesisError::NoGpuSource`]. Scheduler GPU numbers are never read.
 ///
 /// The two errors draw the line between "no GPU here" and "can't tell"
 /// (since v0.2.15), by whether GPU processes could exist that no backend
 /// can show. [`HypomnesisError::NoGpuSource`] means no usable count source
-/// — no `NVML` library to load, as on a machine without an NVIDIA driver,
+/// — no `NVML` library to load, as on a machine without an NVIDIA driver
+/// (and, on Linux, no `ROCm` SMI library either),
 /// or one whose kernel driver is not loaded (`nvmlInit_v2` returns
 /// `NVML_ERROR_DRIVER_NOT_LOADED`), where no process can be on a GPU — so
 /// a caller may read it as zero GPUs, and `hmn ps` and
@@ -76,17 +86,23 @@ mod kinfo;
 /// `NVML_ERROR_LIB_RM_VERSION_MISMATCH` after a driver upgrade without a
 /// reboot, while the old kernel driver keeps running jobs), so the GPUs
 /// may be there, unreadable; reading it as zero GPUs would report a broken
-/// driver as an idle machine. On Windows a `DXGI` count of zero does not
+/// driver as an idle machine. [`HypomnesisError::Rocm`] is the same for a
+/// `ROCm` SMI library that loaded but could not start or count (since
+/// v0.2.16), and a zero from either Linux library does not stand over the
+/// other's broken one. On Windows a `DXGI` count of zero does not
 /// override a broken `NVML`: `DXGI` does not see a `TCC`-mode GPU.
 ///
 /// # Errors
 ///
 /// Returns [`HypomnesisError::NoGpuSource`] if no enumeration backend
 /// is enabled, or if no enabled backend reported a count and `NVML` is
-/// not installed or its kernel driver is not loaded.
+/// not installed or its kernel driver is not loaded (and, on Linux, `ROCm`
+/// SMI is not installed).
 /// Returns [`HypomnesisError::Nvml`] if no enabled backend reported a
 /// positive count and the `NVML` library loaded but could not start or
 /// count.
+/// Returns [`HypomnesisError::Rocm`] likewise for the `ROCm` SMI library on
+/// Linux, unless `NVML`'s broken library comes first.
 pub fn device_count() -> Result<u32> {
     backend_count().map_err(no_count_error)
 }
@@ -197,18 +213,22 @@ fn no_count_error(backend_failure: Option<HypomnesisError>) -> HypomnesisError {
     backend_failure.unwrap_or(HypomnesisError::NoGpuSource)
 }
 
-/// Device-wide info for a specific GPU index (`NVML`-canonical ordering).
+/// Device-wide info for a specific GPU index (`NVML`-canonical ordering, or
+/// `ROCm` SMI's enumeration order for an AMD GPU on Linux).
 ///
 /// Source priority:
 /// 1. `NVML` for `total` / `free` / `used` numerics, augmented with
 ///    `DXGI`'s `Description`-derived `name` on Windows when available.
-/// 2. `DXGI` alone (Windows only): falls back when `NVML` is
+/// 2. `ROCm` SMI (Linux only): `total` / `free` / `used` numerics and the
+///    name of an AMD GPU, when `NVML` has no answer for `index`.
+///    `reserved_bytes` is `None`.
+/// 3. `DXGI` alone (Windows only): falls back when `NVML` is
 ///    unavailable. **Imprecision note:** in this path `used_bytes`
 ///    is set to DXGI's `CurrentUsage`, which is per-process — not the
 ///    device-wide sum. Treat it as a lower bound. This path is rare
 ///    (it requires `NVML` to fail while `DXGI` works, e.g. partial
 ///    driver installs).
-/// 3. `nvidia-smi` subprocess fallback (Phase B+1) — device-wide proper.
+/// 4. `nvidia-smi` subprocess fallback (Phase B+1) — device-wide proper.
 ///
 /// iGPUs and the Microsoft Basic Render Driver are skipped during the
 /// `DXGI` adapter walk (filtered by NVIDIA vendor ID `0x10DE` and
@@ -217,10 +237,12 @@ fn no_count_error(backend_failure: Option<HypomnesisError>) -> HypomnesisError {
 /// # Errors
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `index` is past
-/// the device count reported by `NVML`, `DXGI` or `Metal`.
+/// the device count reported by `NVML`, `ROCm` SMI, `DXGI` or `Metal`.
 /// Returns [`HypomnesisError::Nvml`] if no backend can satisfy the query
 /// and the `NVML` library loaded but could not start or count (see
 /// [`device_count`]).
+/// Returns [`HypomnesisError::Rocm`] likewise for the `ROCm` SMI library
+/// on Linux.
 /// Returns [`HypomnesisError::NoGpuSource`] if no backend can satisfy
 /// the query otherwise.
 #[allow(unused_variables)] // `index` unused when no GPU backend feature is enabled
@@ -332,17 +354,21 @@ pub fn device_info(index: u32) -> Result<GpuDeviceInfo> {
 /// 1. `DXGI` on Windows — the only WDDM-aware per-process source.
 /// 2. `NVML` (Linux primary; on Windows it returns `NVML_VALUE_NOT_AVAILABLE`
 ///    for compute processes under WDDM, so this path is effectively Linux-only).
-/// 3. `nvidia-smi` device-wide fallback (Phase B+1) — sets
+/// 3. `ROCm` SMI (Linux only), after `NVML`:
+///    `rsmi_compute_process_info_by_device_get` for the calling process.
+/// 4. `nvidia-smi` device-wide fallback (Phase B+1) — sets
 ///    `is_per_process = false` because `nvidia-smi` cannot break the
 ///    figure down per process.
 ///
 /// # Errors
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
-/// is past the device count reported by `NVML`, `DXGI` or `Metal`.
+/// is past the device count reported by `NVML`, `ROCm` SMI, `DXGI` or `Metal`.
 /// Returns [`HypomnesisError::Nvml`] if every available backend fails and
 /// the `NVML` library loaded but could not start or count (see
 /// [`device_count`]).
+/// Returns [`HypomnesisError::Rocm`] likewise for the `ROCm` SMI library
+/// on Linux.
 /// Returns [`HypomnesisError::NoGpuSource`] if every available backend
 /// fails otherwise.
 #[allow(unused_variables)] // `device_index` unused when no GPU backend feature is enabled
@@ -480,7 +506,13 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///    mirror the library's other `NVML` consumers; offending rows are
 ///    dropped rather than reported as garbage. Returns compute-only
 ///    processes (active `CUDA` context).
-/// 3. `PDH` (Windows primary, consumer `WDDM`). Reads
+/// 3. `ROCm` SMI (Linux), after `NVML`. `rsmi_compute_process_info_get`
+///    lists every `KFD` process on the host, `rsmi_compute_process_gpus_get`
+///    says which devices each uses, and
+///    `rsmi_compute_process_info_by_device_get` gives its bytes on the
+///    requested one; names come from `/proc/<pid>/comm` as for `NVML`.
+///    Compute-only, like `NVML`.
+/// 4. `PDH` (Windows primary, consumer `WDDM`). Reads
 ///    `\GPU Process Memory(<instance>)\Dedicated Usage` (→
 ///    `used_bytes`, dedicated commit) and its `Shared Usage` sibling
 ///    (→ `shared_used_bytes`, resident shared — the `WDDM` spill
@@ -492,20 +524,20 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///    `VidMm`'s accounting is not compute-only. See the doc-comment of
 ///    the [`Pdh`](crate::GpuQuerySource::Pdh) source for the semantics
 ///    shift.
-/// 4. `nvidia-smi` (fallback) — subprocess
+/// 5. `nvidia-smi` (fallback) — subprocess
 ///    `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits --id=N`.
-///    Reached on `Linux` when `NVML` is missing, or on `Windows` when
+///    Reached on `Linux` when `NVML` and `ROCm` SMI have no answer, or on `Windows` when
 ///    the `PDH` `GPU Process Memory` counter set is unregistered (e.g.
 ///    pre-`WDDM 2.0` drivers — vanishingly rare in 2026). Compute-only
 ///    semantics; under `WDDM` typically returns rows with `[N/A]`
 ///    memory that the parser drops, so the list often appears empty.
-/// 5. `DXGI` is **not** used — `IDXGIAdapter3::QueryVideoMemoryInfo`
+/// 6. `DXGI` is **not** used — `IDXGIAdapter3::QueryVideoMemoryInfo`
 ///    only answers for the calling process and cannot enumerate other
 ///    PIDs.
 ///
 /// # Limitations
 ///
-/// **Per-backend compute-only semantics.** `NVML` and `nvidia-smi`
+/// **Per-backend compute-only semantics.** `NVML`, `ROCm` SMI and `nvidia-smi`
 /// rows are compute-only — browsers using GPU compositing, games, and
 /// pure-graphics apps do not appear. `PDH` rows are **not**
 /// compute-only — they surface every GPU user. Callers comparing
@@ -533,10 +565,12 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 /// # Errors
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
-/// is past the device count reported by `NVML`, `DXGI` or `Metal`.
+/// is past the device count reported by `NVML`, `ROCm` SMI, `DXGI` or `Metal`.
 /// Returns [`HypomnesisError::Nvml`] if every available backend fails and
 /// the `NVML` library loaded but could not start or count (see
 /// [`device_count`]).
+/// Returns [`HypomnesisError::Rocm`] likewise for the `ROCm` SMI library
+/// on Linux.
 /// Returns [`HypomnesisError::NoGpuSource`] if every available backend
 /// fails otherwise (or no backend is enabled by features).
 /// Returns [`HypomnesisError::ProcessListDenied`] on macOS when the
@@ -572,10 +606,12 @@ pub fn gpu_processes(device_index: u32) -> Result<Vec<GpuProcessEntry>> {
 /// # Errors
 ///
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] if `device_index`
-/// is past the device count reported by `NVML`, `DXGI` or `Metal`.
+/// is past the device count reported by `NVML`, `ROCm` SMI, `DXGI` or `Metal`.
 /// Returns [`HypomnesisError::Nvml`] if every available backend fails and
 /// the `NVML` library loaded but could not start or count (see
 /// [`device_count`]).
+/// Returns [`HypomnesisError::Rocm`] likewise for the `ROCm` SMI library
+/// on Linux.
 /// Returns [`HypomnesisError::NoGpuSource`] if every available backend
 /// fails otherwise (or no backend is enabled by features).
 /// Returns [`HypomnesisError::ProcessListDenied`] on macOS when the
@@ -880,7 +916,7 @@ fn status_tgid(status: &str) -> Option<u32> {
 ///
 /// Deterministic across calls — the same input state produces the
 /// same output order, regardless of whether the underlying backend
-/// (`NVML`, `PDH`, `nvidia-smi`, or macOS `Metal` via the ledger
+/// (`NVML`, `ROCm` SMI, `PDH`, `nvidia-smi`, or macOS `Metal` via the ledger
 /// syscall) emits its rows in PID order, allocation order, or
 /// hash-iteration order. Matches the convention every other
 /// process-listing API uses (Unix `ps`, `top -p`, `NVML`'s
@@ -951,7 +987,8 @@ fn resolve_unresolved_windows_names(entries: &mut [GpuProcessEntry]) {
 /// Returns [`HypomnesisError::DeviceIndexOutOfRange`] when a count
 /// source reports a count and `index >= count`.
 /// Returns [`HypomnesisError::Nvml`] when no count source reports a count
-/// and the `NVML` library loaded but could not start or count: the
+/// and the `NVML` library loaded but could not start or count, or
+/// [`HypomnesisError::Rocm`] likewise for `ROCm` SMI on Linux: the
 /// caller's own `NoGpuSource` would hide why.
 fn bounds_check(index: u32) -> Result<()> {
     bounds_verdict(index, backend_count())

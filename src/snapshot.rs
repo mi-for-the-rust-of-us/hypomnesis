@@ -19,14 +19,17 @@ pub struct GpuDeviceInfo {
     ///
     /// For [`Snapshot::now`] and the NVIDIA portion of [`Snapshot::all`],
     /// this is the `NVML`-canonical index (which agrees with the `DXGI`
-    /// NVIDIA-filtered index on Windows). For non-NVIDIA Windows
+    /// NVIDIA-filtered index on Windows). For an AMD GPU on Linux it is
+    /// `ROCm` SMI's enumeration order over the devices visible to the
+    /// process; scheduler GPU numbers are never read. For non-NVIDIA Windows
     /// adapters surfaced by [`Snapshot::all`] (e.g. AMD / Intel iGPUs),
     /// it is a synthetic index assigned after the NVIDIA count and is
     /// **not** addressable via [`Snapshot::now`].
     pub index: u32,
     /// Adapter name (e.g., `NVIDIA GeForce RTX 5060 Ti`).
     /// `None` when the source backend (e.g., `NVML` on a system where
-    /// `nvmlDeviceGetName` failed) does not provide it.
+    /// `nvmlDeviceGetName` failed, or `ROCm` SMI where `rsmi_dev_name_get`
+    /// failed) does not provide it.
     pub name: Option<String>,
     /// Total GPU memory in bytes.
     pub total_bytes: u64,
@@ -40,7 +43,7 @@ pub struct GpuDeviceInfo {
     ///
     /// `Some` only on the `NVML` path with an R510+ driver (where
     /// `nvmlDeviceGetMemoryInfo_v2` succeeds). `None` on older drivers and
-    /// on every non-`NVML` backend (`DXGI`, `nvidia-smi`, Metal).
+    /// on every non-`NVML` backend (`ROCm` SMI, `DXGI`, `nvidia-smi`, Metal).
     ///
     /// When `Some`, this is a **subset of** [`Self::total_bytes`], not an
     /// addition to it: NVML's `total` already satisfies
@@ -53,17 +56,18 @@ pub struct GpuDeviceInfo {
     /// capacity and NVML's `total` — that gap sits *below* `total_bytes`
     /// and NVML does not expose it.)
     pub reserved_bytes: Option<u64>,
-    /// NVIDIA driver version, in the NVIDIA-branded form (e.g.
+    /// Driver version: for NVIDIA, in the NVIDIA-branded form (e.g.
     /// `"610.88"`) — the same string `nvidia-smi`, release notes, and
     /// bug reports use. **Not** the Windows `PnP` driver-store form (e.g.
     /// `"32.0.16.1088"`); `NVML` and `nvidia-smi` do not expose that
     /// form, so this field cannot supply it.
     ///
-    /// `Some` on the `NVML` path (`nvmlSystemGetDriverVersion`) and the
-    /// `nvidia-smi` fallback path (`--query-gpu=driver_version`) — any
-    /// platform where one of those backends succeeds. `None` on
+    /// `Some` on the `NVML` path (`nvmlSystemGetDriverVersion`), the
+    /// `ROCm` SMI path (`rsmi_version_str_get`, for an AMD GPU on Linux)
+    /// and the `nvidia-smi` fallback path (`--query-gpu=driver_version`) —
+    /// any platform where one of those backends succeeds. `None` on
     /// `DXGI`-alone, non-NVIDIA `DXGI` adapters, and `Metal` (macOS has
-    /// no NVIDIA driver), or when both `NVML` and `nvidia-smi` fail.
+    /// no NVIDIA driver), or when every backend that applies fails.
     pub driver_version: Option<String>,
 }
 
@@ -78,7 +82,7 @@ pub struct ProcessGpuInfo {
     /// When `is_per_process` is `false`, this is the device-wide total
     /// (the `nvidia-smi` fallback cannot break the figure down per process).
     pub used_bytes: u64,
-    /// `true` when the value is genuinely per-process (`DXGI` or `NVML`);
+    /// `true` when the value is genuinely per-process (`DXGI`, `NVML` or `ROCm` SMI);
     /// `false` when it falls back to a device-wide reading from `nvidia-smi`.
     pub is_per_process: bool,
     /// Which backend produced this measurement.
@@ -87,8 +91,7 @@ pub struct ProcessGpuInfo {
 
 /// The backend that produced a GPU memory measurement.
 ///
-/// `#[non_exhaustive]`: more backends (e.g., AMD `ROCm` SMI, Apple Metal)
-/// may be added.
+/// `#[non_exhaustive]`: more backends may be added.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuQuerySource {
@@ -134,9 +137,9 @@ pub enum GpuQuerySource {
 /// What "processes on the device" *means* depends on which backend
 /// produced the row:
 ///
-/// - [`GpuQuerySource::Nvml`] and [`GpuQuerySource::NvidiaSmi`] are
-///   **compute-only**. They only see processes with an active `CUDA`
-///   context — browsers using GPU compositing, games, and
+/// - [`GpuQuerySource::Nvml`], [`GpuQuerySource::Rocm`] and
+///   [`GpuQuerySource::NvidiaSmi`] are **compute-only**. They only see
+///   processes with an active `CUDA` (or `ROCm`) context — browsers using GPU compositing, games, and
 ///   pure-graphics apps do not appear.
 /// - [`GpuQuerySource::Pdh`] (Windows-only, consumer `WDDM`) reports
 ///   **every** process holding GPU memory: the desktop compositor,
@@ -153,7 +156,7 @@ pub struct GpuProcessEntry {
     /// OS process ID.
     pub pid: u32,
     /// Process name. `None` when no name source is available — `NVML`
-    /// rows whose `/proc/<pid>/comm` was unreadable. On Linux the name
+    /// and `ROCm` SMI rows whose `/proc/<pid>/comm` was unreadable. On Linux the name
     /// is that `comm`, extended past the kernel's 15-byte cut when the
     /// `/proc/<pid>/exe` link or `argv[0]` shows the full name (since
     /// v0.2.12; before, a long name such as `figure13_newline_patch`
@@ -188,7 +191,7 @@ pub struct GpuProcessEntry {
     /// **commit** (reservation) figure, not the resident set — it can
     /// legitimately exceed physical `VRAM`; see the sibling
     /// `shared_used_bytes` for the residency-based spill signal. On
-    /// `NVML` / `nvidia-smi` / `Metal` rows it carries those
+    /// `NVML` / `ROCm` SMI / `nvidia-smi` / `Metal` rows it carries those
     /// backends' documented per-process semantics.
     pub used_bytes: u64,
     /// Resident shared-system-memory bytes for this process — the
@@ -198,13 +201,13 @@ pub struct GpuProcessEntry {
     /// is `VidMm`'s dedicated **commit** — is the number that grows
     /// when the kernel pages GPU allocations out of dedicated `VRAM`
     /// into shared system memory. Populated only on the Windows
-    /// [`GpuQuerySource::Pdh`] path; `0` on `NVML`, `nvidia-smi`, and
+    /// [`GpuQuerySource::Pdh`] path; `0` on `NVML`, `ROCm` SMI, `nvidia-smi`, and
     /// `Metal` rows (no shared-residency counter exists on those
     /// backends).
     pub shared_used_bytes: u64,
     /// Which backend produced this row. One of [`GpuQuerySource::Nvml`],
-    /// [`GpuQuerySource::Pdh`], [`GpuQuerySource::NvidiaSmi`], or
-    /// [`GpuQuerySource::Metal`].
+    /// [`GpuQuerySource::Rocm`], [`GpuQuerySource::Pdh`],
+    /// [`GpuQuerySource::NvidiaSmi`], or [`GpuQuerySource::Metal`].
     /// `DXGI`'s `QueryVideoMemoryInfo` only answers for the calling
     /// process and cannot enumerate other PIDs, so
     /// [`GpuQuerySource::Dxgi`] is never the source of a
@@ -267,7 +270,8 @@ impl Snapshot {
     ///
     /// # Performance
     ///
-    /// Each call performs a full `NVML` init/shutdown cycle (and, on Windows,
+    /// Each call performs a full `NVML` init/shutdown cycle (a `ROCm` SMI
+    /// one on an AMD GPU on Linux, and, on Windows,
     /// a fresh `IDXGIFactory1` walk). This adds a few milliseconds of
     /// overhead per call — fine for occasional sampling around training
     /// steps or model loads, less ideal for tight per-frame polling. A
@@ -276,9 +280,10 @@ impl Snapshot {
     ///
     /// # Per-process vs device-wide
     ///
-    /// When `DXGI` (Windows) or `NVML` (Linux) succeeds, `gpu.used_bytes`
-    /// is genuinely per-process and `gpu.is_per_process` is `true`. When
-    /// the dispatcher falls back to `nvidia-smi` (no `NVML`/`DXGI`
+    /// When `DXGI` (Windows), `NVML` or `ROCm` SMI (Linux) succeeds,
+    /// `gpu.used_bytes` is genuinely per-process and `gpu.is_per_process`
+    /// is `true`. When
+    /// the dispatcher falls back to `nvidia-smi` (no `NVML`/`ROCm` SMI/`DXGI`
     /// available, or `WDDM` `NVML_VALUE_NOT_AVAILABLE`), `gpu.used_bytes`
     /// reflects the **device-wide** total and `gpu.is_per_process` is
     /// `false`. Callers that need true per-process accounting should
@@ -304,10 +309,10 @@ impl Snapshot {
     /// Capture a fresh snapshot of process `RAM` and GPU memory **for every
     /// visible GPU**.
     ///
-    /// On Linux: enumerates NVIDIA dGPU(s) via `NVML`. AMD / Intel iGPUs
-    /// do not surface — there is no AMD / Intel backend yet (an AMD
-    /// `ROCm` SMI backend is a possibility for a later release; see
-    /// `docs/roadmap-v0.2.0.md`).
+    /// On Linux: enumerates NVIDIA dGPU(s) via `NVML` and AMD GPU(s) via
+    /// `ROCm` SMI, the devices [`crate::device_count`] counts; an AMD GPU is
+    /// indexed in `ROCm` SMI's enumeration order, as the NVIDIA ones are in
+    /// `NVML`'s. Intel GPUs do not surface — there is no Intel backend.
     ///
     /// On macOS (`metal` feature, since v0.2.3): the Apple Silicon GPU, one
     /// unified-memory device.
@@ -346,14 +351,16 @@ impl Snapshot {
     ///
     /// # Performance
     ///
-    /// Each NVIDIA device queried calls [`crate::process_gpu_info`] and
+    /// Each device queried calls [`crate::process_gpu_info`] and
     /// [`crate::device_info`], each of which performs a fresh `NVML`
+    /// (or, for an AMD GPU on Linux, `ROCm` SMI)
     /// init / shutdown cycle (and, on Windows, a fresh `IDXGIFactory1`
     /// walk). On Windows, `Snapshot::all` additionally walks
     /// `IDXGIFactory1` once more for the non-NVIDIA enumeration. For an
     /// N-GPU system the worst-case cost is therefore
     /// `N × (NVML init + shutdown + DXGI walk) + 1 × DXGI walk` on
-    /// Windows, and `N × (NVML init + shutdown)` on Linux. A long-lived
+    /// Windows, and `N × (NVML init + shutdown)` on Linux (`ROCm` SMI
+    /// init / shutdown for an AMD GPU). A long-lived
     /// `NVML` context is planned for a later release.
     ///
     /// # Errors
@@ -364,14 +371,15 @@ impl Snapshot {
     /// `Ram` variant rather than surfaced as `Io`.
     /// Returns [`crate::HypomnesisError::Nvml`] when no backend reports a
     /// GPU count and the `NVML` library loaded but could not start or
-    /// count (see [`crate::device_count`]).
+    /// count, or [`crate::HypomnesisError::Rocm`] likewise for the `ROCm`
+    /// SMI library on Linux (see [`crate::device_count`]).
     pub fn all() -> Result<Vec<Self>> {
         let ram_bytes = crate::ram::process_rss()?;
 
-        // `NoGpuSource` means no count source is installed: zero NVIDIA
+        // `NoGpuSource` means no count source is installed: zero counted
         // GPUs, and the Windows DXGI extras path (if compiled in) can
         // still surface iGPUs. Any other error is an installed source
-        // that is broken (`HypomnesisError::Nvml`): the GPUs may be there,
+        // that is broken (`HypomnesisError::Nvml` or `Rocm`): the GPUs may be there,
         // and an empty Vec would say there are none.
         let nvidia_count = match crate::gpu::device_count() {
             Ok(count) => count,
@@ -437,7 +445,7 @@ impl Snapshot {
     ///
     /// Returns `None` when `gpu` is `None` (no GPU source succeeded).
     /// Reflects the dispatcher's mixed semantics: per-process when
-    /// `DXGI` / `NVML` produced the value, device-wide when the
+    /// `DXGI` / `NVML` / `ROCm` SMI produced the value, device-wide when the
     /// `nvidia-smi` fallback was used (check `gpu.is_per_process`).
     #[must_use]
     pub fn vram_mb(&self) -> Option<f64> {
