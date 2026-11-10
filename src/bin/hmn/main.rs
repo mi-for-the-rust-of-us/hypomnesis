@@ -218,8 +218,9 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// List processes holding GPU memory. On Linux: compute-only via
-    /// NVML or, for an AMD GPU, `ROCm` SMI. On Windows / WDDM 2.0+: every GPU memory holder via PDH
-    /// (compositor, browsers, compute, etc.). On macOS: every
+    /// NVML or, for an AMD GPU, `ROCm` SMI. On Windows / WDDM 2.0+:
+    /// every GPU memory holder via PDH (compositor, browsers, compute,
+    /// etc.). On macOS: every
     /// process holding `graphics_footprint` ledger bytes that the
     /// sandbox lets it read (the sandbox, not process ownership, decides;
     /// see README Limitations, item 9); the processes it cannot read are
@@ -301,9 +302,10 @@ enum Commands {
         /// is an empty listing that skipped a failed device or left
         /// unreadable a process the filters could match, since `1` means
         /// nothing matched on every device queried and no process the
-        /// filters could match was unreadable. A machine with no GPU
-        /// driver at all (neither NVIDIA's nor AMD's), or a job given no GPU, has no device to query:
-        /// the summary says `(no GPU to list)`, and the exit is `1`.
+        /// filters could match was unreadable. A machine with no NVIDIA
+        /// driver and no loadable `ROCm` SMI library, or a job given no
+        /// GPU, has no device to query: the summary says
+        /// `(no GPU to list)`, and the exit is `1`.
         #[arg(long)]
         exit_status: bool,
     },
