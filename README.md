@@ -245,11 +245,13 @@ GPU 1 [Intel Iris Xe Graphics]: free 32768 MiB / 32768 MiB
 AMD GPU on Linux (`ROCm SMI`, AMD Instinct MI300X, `ROCm` 7.2.4), `hmn` and `hmn ps`:
 
 ```
-{{acceptance:summary}}
+GPU 0 [AMD Instinct MI300X OAM]: free 192067 MiB / 196592 MiB, driver 6.16.13
+GPU 1 [AMD Instinct MI300X OAM]: free 196307 MiB / 196592 MiB, driver 6.16.13
 ```
 
 ```
-{{acceptance:ps}}
+PID      NAME     VRAM     SHARED  GPU  DEVICE                   SPILL
+1678361  python3  4.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a
 ```
 
 A GPU that fails to answer is not dropped silently (since v0.2.15): `hmn` names it on stderr, as `hmn ps` does, and lists the others with exit `0`:

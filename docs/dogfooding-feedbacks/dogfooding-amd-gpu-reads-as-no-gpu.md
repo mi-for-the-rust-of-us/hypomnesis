@@ -101,11 +101,11 @@ from zero. In-job, ROCm's index is canonical: the `GPU` column of `hmn ps` shoul
 1. **The device-wide figure is the check, not the tool's own number.** The per-process figure was
    trusted only because `rocm-smi --showmeminfo vram` moved by the same amount to within 80 KiB;
    an acceptance run should keep that cross-check beside `hmn`'s row.
-2. **Per-process listing looked job-scoped, and that is not proof.** `amd-smi process --json` showed
-   the caller's process and no foreign one, but no other GPU job was running on the node then. An
-   acceptance run on a two-MI300X allocation listed no row for another PID, and
-   `rocm-smi --showpids` listed none either, so how a foreign process appears under
-   `ConstrainDevices=yes` was not measured.
+2. **Processes on other devices do not appear.** `amd-smi process --json` showed the caller's
+   process and no foreign one, but no other GPU job was running on the node then. In the acceptance
+   run on a two-MI300X allocation, `rocm-smi --showpids` listed 9 other processes, each on no device
+   of the allocation and holding 0 B of VRAM, and `hmn ps` listed no row for them. A foreign process
+   holding VRAM on a device of the allocation was not measured.
 3. **The KFD directory lists processes, not their VRAM.** `/sys/class/kfd/kfd/proc` holds one
    directory per process; whether VRAM figures sit under it was not read.
 4. **Several GPUs were measured on a two-MI300X allocation.** `hmn ps` with one process on device 0
@@ -115,19 +115,21 @@ from zero. In-job, ROCm's index is canonical: the `GPU` column of `hmn ps` shoul
 
 ## Acceptance fixtures (already run, free to regress against)
 
-Each row is produced by the backend's acceptance run on an MI300X allocation: one process holding a
-4 GiB `hipMalloc`, with `rocm-smi --showmeminfo vram` read before and during as the independent
-signal. The result cell holds the command's captured stdout, stderr and exit status.
+Each row is produced by the backend's acceptance run on a two-MI300X allocation: one process holding
+a 4 GiB `hipMalloc` on device 0, with `rocm-smi --showmeminfo vram` read before and during as the
+independent signal; the two-device row adds a second process holding 1 GiB on device 0 and 2 GiB on
+device 1, and the no-GPU row runs in an allocation granted no GPU. The result cell holds the
+command's captured stdout, stderr and exit status.
 
 | Case | Command | Must hold | Result |
 |---|---|---|---|
-| one MI300X, one holder | `hmn` | names the GPU, free and total in MiB, exit `0` | {{acceptance:summary}} |
-| one MI300X, one holder | `hmn ps` | one row, VRAM within 1 MiB of `rocm-smi --showpids`, `GPU` 0 | {{acceptance:ps}} |
-| one MI300X, one holder | `hmn ps --json` | the row's bytes equal `mem_usage` | {{acceptance:ps_json}} |
-| library present but broken | `hmn ps` | exit `2`, an error line, not an empty table | {{acceptance:broken_ps}} |
-| library present but broken | `hmn` | exit `2`, an error line, not `no visible GPUs.` | {{acceptance:broken_summary}} |
-| no GPU of any vendor | `hmn` | `no visible GPUs.`, exit `0`, unchanged | {{acceptance:plain}} |
-| two devices visible | `hmn ps` | `GPU` column carries ROCm's indexes, one per device | {{acceptance:two_device}} |
+| two MI300X, one holder on device 0 | `hmn` | names the GPU, free and total in MiB, exit `0` | `GPU 0 [AMD Instinct MI300X OAM]: free 192067 MiB / 196592 MiB, driver 6.16.13`<br>`GPU 1 [AMD Instinct MI300X OAM]: free 196307 MiB / 196592 MiB, driver 6.16.13`<br>exit `0` |
+| two MI300X, one holder on device 0 | `hmn ps` | one row, VRAM within 1 MiB of `rocm-smi --showpids`, `GPU` 0 | `PID      NAME     VRAM     SHARED  GPU  DEVICE                   SPILL`<br>`1678361  python3  4.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a`<br>`hmn: 1 GPU process found (4.1 GiB committed total).`<br>exit `0` |
+| two MI300X, one holder on device 0 | `hmn ps --json` | the row's bytes equal `mem_usage` | `[{"pid":1678361,"name":"python3","used_bytes":4445999104,"shared_used_bytes":0,"device_index":0,"device_name":"AMD Instinct MI300X OAM","spilling":null,"paged":null,"shared_share":null}]`<br>`hmn: 1 GPU process found (4.1 GiB committed total).`<br>exit `0` |
+| library present but broken | `hmn ps` | exit `2`, an error line, not an empty table | `hmn: ps failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INTERNAL_EXCEPTION (6)`<br>`hmn: ps: no device could be queried, so nothing could be listed`<br>exit `2` |
+| library present but broken | `hmn` | exit `2`, an error line, not `no visible GPUs.` | `hmn: failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INTERNAL_EXCEPTION (6)`<br>exit `2` |
+| an allocation granted no GPU | `hmn` | `no visible GPUs.`, exit `0` | `hmn: no visible GPUs.`<br>exit `0` |
+| two devices, a second process on both | `hmn ps` | `GPU` column carries ROCm's indexes, one row per device | `PID      NAME     VRAM     SHARED  GPU  DEVICE                   SPILL`<br>`1678361  python3  4.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a`<br>`1678481  python3  2.1 GiB  0 MiB   1    AMD Instinct MI300X OAM  n/a`<br>`1678481  python3  1.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a`<br>`hmn: 3 GPU processes found (7.4 GiB committed total).`<br>exit `0` |
 
 ## Confidence
 
