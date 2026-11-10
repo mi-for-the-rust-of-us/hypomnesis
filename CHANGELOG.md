@@ -27,8 +27,7 @@ The parity claim is Linux only and is written down row by row in the README, in
   (`rsmi_compute_process_info_get` with `rsmi_compute_process_gpus_get`, compute-only, names from
   `/proc`). On Linux the dispatchers ask it after `NVML` and before `nvidia-smi`. `reserved_bytes`
   is `None` and spill is not measurable, as on any Linux source that lacks them.
-- **`GpuQuerySource::Rocm`** (`src/snapshot.rs`) — the `source` of rows read through `ROCm` SMI,
-  printed as `Rocm` in `--json`.
+- **`GpuQuerySource::Rocm`** (`src/snapshot.rs`) — the `source` of rows read through `ROCm` SMI.
 - **`HypomnesisError::Rocm`** (`src/error.rs`) — a `ROCm` SMI library that loads but fails to start
   or answer, reading `ROCm error: …`. `hmn` and `hmn ps` both exit `2` on it, with nothing on
   stdout, as they do on `HypomnesisError::Nvml`.

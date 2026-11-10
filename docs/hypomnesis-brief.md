@@ -43,7 +43,7 @@ Availability confirmed on crates.io and GitHub (2026-04-29). The v0.0.1 placehol
 - Compute-process listing: NVML or ROCm SMI + `/proc/<pid>/comm` on Linux, `nvidia-smi` on Windows, `proc_listpids` + per-PID `ledger` + `proc_pidpath` on macOS
 - `nvidia-smi` subprocess fallback (device-wide, Windows + Linux)
 - Robust sentinel handling (NVML `u64::MAX`, used > total sanity check)
-- GPU adapter name (DXGI description field on Windows, NVML on Linux, CPU brand string on macOS)
+- GPU adapter name (DXGI description field on Windows, NVML or ROCm SMI on Linux, CPU brand string on macOS)
 
 **Explicitly out of scope:**
 - Inference tracking (candle-mi's `sync_and_trim_gpu` stays in candle-mi — it's candle/cudarc-specific)

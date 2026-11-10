@@ -91,9 +91,9 @@ Reading the library on the same node settled the questions the report left open:
   with no new guard. The Windows-only `DXGI` and `PDH` arms are untouched, and the cfg lists that
   name Linux backends gain `rocm`.
 - **The count rule: a positive count stands, `NVML`'s first; otherwise the first broken detail,
-  `NVML`'s first; otherwise a zero; otherwise `NoGpuSource`.** `NvmlCount::Counted(0)` used to
-  answer at once, so on a host with an NVIDIA userland and only AMD GPUs an `NVML` zero would have
-  masked every AMD device. As in the `DXGI` rule (`dxgi_count_stands`), a zero never stands over a
+  `NVML`'s first; otherwise a zero; otherwise `NoGpuSource`.** In v0.2.15 `NvmlCount::Counted(0)`
+  answered at once, so on a host with an NVIDIA userland and only AMD GPUs an `NVML` zero masked
+  every AMD device. As in the `DXGI` rule (`dxgi_count_stands`), a zero never stands over a
   broken library. ROCm is asked only when `NVML`'s count is not positive. The rule is a pure
   function with its own unit tests. A broken ROCm reads as
   `Rocm(..)`, not `Nvml(..)`: the error carried out of the count is the backend's own.
@@ -193,10 +193,37 @@ ROCm releases, and an AMD iGPU.
 
 ## Consistency pass
 
-After the last item, fresh agents that have not seen the work audit the range: one against
-`CONVENTIONS.md`, one adversarially for correctness and test quality, one for drift between the
-docs and the code, including an end sweep of `Nvml` and `NVML` in `src/` for an NVIDIA-only claim
-that ROCm now falsifies. They report findings only; the adopted ones are recorded here.
+Run by a reviewer with no part in the work, who read the range from v0.2.15 to the tip against
+the plan, the spec delta, the roadmap leaves and the acceptance evidence. The question was
+consistency and whether each AMD claim in the shipped text is backed by the code or by an
+acceptance row. Both Capabilities tables agree on the shared rows, AMD cells included; each of the
+ten README Capabilities rows has a cell in the AMD subsection; the AMD samples in the README equal
+the captured acceptance output; a broken library makes `hmn` and `hmn ps` exit `2`; the per-device
+figures, the within-1-MiB claim and the per-process `NoGpuSource` cell match the measurements.
+
+Adopted:
+
+- The `GpuQuerySource::Rocm` entry of the CHANGELOG does not mention `--json`, whose output
+  carries no `source`.
+- The dogfooding report's smaller observations state what the two-MI300X acceptance run
+  measured and what it did not.
+- The README's AMD subsection states the measured per-process overhead, 144 MiB on an MI300X
+  against about 518 MiB of `CUDA` context on an H200.
+- Limitation 7 of the README carries its AMD counterpart, none known.
+- The FAQ gives the Linux `NoGpuSource` text and names the missing `ROCm` library under
+  `no visible GPUs.`
+- The README's Feature Flags rows for `nvidia-smi-fallback` and `debug-output` name `ROCm` SMI,
+  as `src/lib.rs` does.
+- The driver-suffix sentence, its elision list, the brief's adapter-name line and the FAQ's
+  device-order sentences name `ROCm` SMI where they speak of Linux in general.
+- The count rule states the v0.2.15 behaviour it replaces, and this section and the
+  decisions below are in final-state wording.
+
+Not adopted:
+
+- `ProcessGpuInfo::source` and `GpuProcessEntry::source` read `GpuQuerySource::Rocm` because
+  `rocm::query` and `rocm::list_compute_processes` set it. No hardware test pins the value, since a
+  test binary holds no compute context.
 
 ---
 
@@ -204,8 +231,7 @@ that ROCm now falsifies. They report findings only; the adopted ones are recorde
 
 Decided on 2026-11-09, before the first commit:
 
-- **The backend is built now**, and the pull request is the maintainer's review gate. The deferred
-  row's hardware condition is met by the node in the report.
+- **The backend is built.** The deferred row's hardware condition is met by the node in the report.
 - **The `NoGpuSource` text names ROCm on Linux**, as it names `DXGI` and `PDH` on Windows.
 - **Both fake-library test files skip when the other vendor's real stack answers**, the existing
   idiom for a missing C compiler.
