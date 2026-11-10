@@ -5,7 +5,7 @@
 /// Errors that can occur during a `hypomnesis` measurement.
 ///
 /// `#[non_exhaustive]`: new variants will be added as new backends are introduced
-/// (e.g., AMD `ROCm` SMI). Patch-release-safe.
+/// (the most recent is [`Self::Rocm`], for AMD `ROCm` SMI on Linux). Patch-release-safe.
 ///
 /// # `Display` vs structured fields
 ///
@@ -14,7 +14,8 @@
 /// the consumer is content with the default rendering. Structured fields
 /// ([`Self::DeviceIndexOutOfRange`]'s `index` / `count`,
 /// [`Self::ProcessListDenied`]'s `denied`, the inner `String` of
-/// [`Self::Nvml`] / [`Self::Dxgi`] / [`Self::Pdh`] / [`Self::NvidiaSmi`]) are
+/// [`Self::Nvml`] / [`Self::Rocm`] / [`Self::Dxgi`] / [`Self::Pdh`] /
+/// [`Self::NvidiaSmi`]) are
 /// the **canonical source** for any consumer that wants to:
 ///
 /// - Localize the message to a non-English language.
@@ -56,7 +57,8 @@ pub enum HypomnesisError {
     Nvml(String),
 
     /// The `ROCm` SMI library (`librocm_smi64`) loaded but could not start
-    /// or count, and no other backend reported a positive count: its init
+    /// or count, and no other backend reported a positive count (since
+    /// v0.2.16): its init
     /// or device-count call is missing from the library, or returned an
     /// error. The text names the call and the return code. Unlike
     /// [`Self::NoGpuSource`], it does not mean "no GPU here": the GPUs may
@@ -98,7 +100,8 @@ pub enum HypomnesisError {
     /// Returned when every GPU backend compiled for the platform failed (or
     /// was disabled by feature flags) for a single query, unless the `NVML`
     /// library loaded but could not start or count, which is
-    /// [`Self::Nvml`] instead (since v0.2.15). From [`crate::device_count`]
+    /// [`Self::Nvml`] instead (since v0.2.15), or, on Linux, the `ROCm` SMI
+    /// library did, which is [`Self::Rocm`] instead (since v0.2.16). From [`crate::device_count`]
     /// it means no count source is installed, which a caller may read as
     /// zero GPUs. The message names the platform's backends: `NVML`,
     /// `DXGI`, `PDH` and `nvidia-smi` on Windows; `Metal`, `NVML` and
