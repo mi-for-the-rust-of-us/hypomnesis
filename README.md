@@ -7,6 +7,7 @@
 [![license](https://img.shields.io/crates/l/hypomnesis.svg)](https://github.com/mi-for-the-rust-of-us/hypomnesis#license)
 [![unsafe: deny](https://img.shields.io/badge/unsafe-deny_(FFI_backends_only)-blue.svg)](https://github.com/rust-secure-code/safety-dance/)
 [![NVIDIA](https://img.shields.io/badge/NVIDIA-NVML_%2B_DXGI-76B900.svg?logo=nvidia&logoColor=white)](#capabilities)
+[![AMD](https://img.shields.io/badge/AMD-ROCm_SMI_(Linux)-ED1C24.svg?logo=amd&logoColor=white)](#amd-gpus-on-linux-parity-with-nvidia)
 
 **ὑπόμνησις** — *External RAM and VRAM, measured.*
 
@@ -47,13 +48,15 @@
 hypomnesis = "0.2"
 ```
 
-The default feature set (`nvml`, `dxgi`, `pdh`, `metal`, `nvidia-smi-fallback`, `cli`) covers process RSS, per-process / device-wide GPU memory, the foreign-process GPU listing, `WDDM` spill detection on Windows (`IDXGIAdapter3` + `PDH` + `NVML`) and Linux (`NVML`), a `nvidia-smi` subprocess fallback, and (since v0.2.8) the `hmn` CLI binary itself — see the [Feature Flags](#feature-flags) table for the per-flag breakdown. The `windows`-crate dependency behind `dxgi` / `pdh` is target-conditional — Linux users pay nothing for it.
+The default feature set (`nvml`, `rocm`, `dxgi`, `pdh`, `metal`, `nvidia-smi-fallback`, `cli`) covers process RSS, per-process / device-wide GPU memory, the foreign-process GPU listing, `WDDM` spill detection on Windows (`IDXGIAdapter3` + `PDH` + `NVML`) and Linux (`NVML`), AMD GPUs on Linux (`ROCm SMI`), a `nvidia-smi` subprocess fallback, and (since v0.2.8) the `hmn` CLI binary itself — see the [Feature Flags](#feature-flags) table for the per-flag breakdown. The `windows`-crate dependency behind `dxgi` / `pdh` is target-conditional — Linux users pay nothing for it.
 
 Library-only consumers who don't want `clap`/`ctrlc` pulled in should pass `--no-default-features` and select source features explicitly:
 
 ```toml
-hypomnesis = { version = "0.2", default-features = false, features = ["nvml", "dxgi", "pdh"] }
+hypomnesis = { version = "0.2", default-features = false, features = ["nvml", "rocm", "dxgi", "pdh"] }
 ```
+
+On Linux, the `rocm` feature is in the default set. It loads `librocm_smi64.so.1` at run time, so a host without ROCm is unaffected and needs nothing installed; where the library is present, AMD GPUs are read through it (see [AMD GPUs on Linux: parity with NVIDIA](#amd-gpus-on-linux-parity-with-nvidia)).
 
 On macOS, the `metal` feature is in the default set. Process RSS and per-process GPU memory come from libSystem syscalls (`task_info`, `ledger`, `sysctl`). The device-wide "free" figure comes from `MTLDevice.recommendedMaxWorkingSetSize` via the `objc2-metal` binding (target-conditional, macOS-only) — no libSystem signal on Apple Silicon UMA approximates Apple's own kernel-projected GPU working-set budget within useful accuracy.
 
@@ -239,13 +242,23 @@ GPU 1 [Intel Iris Xe Graphics]: free 32768 MiB / 32768 MiB
 
 (The Intel iGPU line has no reserved parenthetical or driver suffix — `DXGI` does not expose the NVML carve-out or an NVIDIA driver string, so `reserved_bytes` and `driver_version` are both `None` there.)
 
+AMD GPU on Linux (`ROCm SMI`, AMD Instinct MI300X, `ROCm` 7.2.4), `hmn` and `hmn ps`:
+
+```
+{{acceptance:summary}}
+```
+
+```
+{{acceptance:ps}}
+```
+
 A GPU that fails to answer is not dropped silently (since v0.2.15): `hmn` names it on stderr, as `hmn ps` does, and lists the others with exit `0`:
 
 ```
 hmn: failed to query device 1: no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed or are disabled) (skipped)
 ```
 
-When no GPU can be read (`hmn: 2 GPU(s) enumerated but none readable.`), or the GPUs cannot be counted (`hmn: failed to count devices: NVML error: nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`, an NVIDIA driver upgraded without a reboot), `hmn` exits `2` with nothing on stdout, `--json` included, so a script never reads a broken driver as a machine without GPUs. `hmn: no visible GPUs.` (exit `0`) means there is no NVIDIA driver, one whose kernel driver is not loaded, or one that counts no GPU: no process can be on a GPU there.
+When no GPU can be read (`hmn: 2 GPU(s) enumerated but none readable.`), or the GPUs cannot be counted (`hmn: failed to count devices: NVML error: nvmlInit_v2 returned NVML_ERROR_LIB_RM_VERSION_MISMATCH (18)`, an NVIDIA driver upgraded without a reboot, or a `ROCm` library that loads but fails to start), `hmn` exits `2` with nothing on stdout, `--json` included, so a script never reads a broken driver as a machine without GPUs. `hmn: no visible GPUs.` (exit `0`) means there is no NVIDIA driver, one whose kernel driver is not loaded, no `ROCm` library (`librocm_smi64.so.1`), one that reports no AMD GPU, or a driver that counts no GPU: no process can be on a GPU there. A host with an AMD GPU but no ROCm userland reads this way, since the library that reads the GPU is the one that is missing.
 
 `hmn ps` (illustrative — empty on machines with no active CUDA workload):
 
@@ -273,7 +286,7 @@ The stderr summary is printed even when the table is empty (except when every de
 
 **Limitations** (intrinsic to the underlying data sources, not bugs — longer-form answers to the recurring ones live in the [FAQ](docs/FAQ.md)):
 
-1. **Per-platform semantics differ — compute-only on Linux, all-GPU-users on Windows.** `hmn ps` on Linux (via `NVML`'s `nvmlDeviceGetComputeRunningProcesses_v3`) enumerates only processes with an active `CUDA` context — browsers using GPU compositing, games, and pure-graphics apps do not appear. `hmn ps` on Windows (via `PDH`'s `\GPU Process Memory(*)\Dedicated Usage`) enumerates **every** process holding GPU memory — the desktop compositor (`dwm.exe`), browsers, games, and `CUDA` / compute alongside. The semantic shift reflects what each platform's kernel actually accounts for; check the `source` field on `GpuProcessEntry` if you care about the distinction.
+1. **Per-platform semantics differ — compute-only on Linux, all-GPU-users on Windows.** `hmn ps` on Linux (via `NVML`'s `nvmlDeviceGetComputeRunningProcesses_v3`) enumerates only processes with an active `CUDA` context (on AMD, via `ROCm SMI`, only processes with a compute context) — browsers using GPU compositing, games, and pure-graphics apps do not appear. `hmn ps` on Windows (via `PDH`'s `\GPU Process Memory(*)\Dedicated Usage`) enumerates **every** process holding GPU memory — the desktop compositor (`dwm.exe`), browsers, games, and `CUDA` / compute alongside. The semantic shift reflects what each platform's kernel actually accounts for; check the `source` field on `GpuProcessEntry` if you care about the distinction.
 
 2. **Windows `used_bytes` reflects WDDM's *dedicated commit*, not resident set.** Under `WDDM` a process can commit GPU allocations exceeding physical `VRAM` — the kernel pages them via the shared system memory budget. Numbers exceeding the device's total `VRAM` are real, not bugs: they match Task Manager's `Dedicated GPU memory` column. (Example: on a 16 GiB GPU, a heavy browser process can show 15+ GiB committed.)
 
@@ -303,6 +316,8 @@ The stderr summary is printed even when the table is empty (except when every de
 8. **macOS `used_bytes` reflects currently-resident GPU pages.** The kernel evicts idle Metal pages from a process's `graphics_footprint`, so the same PID may report different values across successive `hmn ps` calls when its working set has cooled. This is the same resident-bytes semantics as Windows `WorkingSetSize` and Linux `VmRSS` — not a macOS quirk, the cross-platform contract.
 
 9. **On macOS the sandbox decides what `hmn` can read, not who owns a process.** Unsandboxed (a shell, Terminal.app, an elevated shell), `hmn ps` lists every user's processes that hold GPU memory, root's included (measured: 0 `EPERM` over 920 PIDs); no elevation is needed, and elevation does not help. Inside a sandbox that denies `process-info` (an App Sandbox app, or an agent harness's Seatbelt profile) `hmn` measures what is permitted and counts the rest: `hmn ps` lists the processes it can read and ends its summary with `N unreadable — re-run outside the sandbox`. When it can read nothing but itself, `hmn ps` prints `hmn: ps failed to query device 0: process list unreadable (…)` and exits `2` with no table, and `--exit-status` exits `2` rather than `1` when a process the filters could match was unreadable or a device failed. A name the kernel withholds from `proc_pidpath` falls back to the process's `p_comm`, cut at 16 bytes. Elevation does not help a sandboxed caller. `hmn watch` reads the refused set once, at attach: `--follow-new` says how many processes it cannot follow then, and a refused process that starts later is neither followed nor counted.
+
+10. **AMD on Linux: the listing covers the host, the rows cover the device.** `ROCm SMI` lists every compute process on the host, whoever owns it; `hmn ps` keeps, for each GPU, the processes that hold memory on that GPU and reads their bytes there, so a process on GPU 1 is not a row of GPU 0. Rows are compute-only, as with `NVML`, and SHARED is always `0`. A host with an AMD GPU but no ROCm userland (`librocm_smi64.so.1` absent) is read as a host with no GPU. Mixed-vendor hosts, one with both NVIDIA and AMD GPUs, are unsupported: the count follows `NVML` where it counts a GPU, and `ROCm SMI` otherwise. The AMD path was tested on an AMD Instinct MI300X with `ROCm` 7.2.4. Untested: a job granted no GPU on an AMD node, another user's process on a GPU the caller can see, and the PIDs `hmn ps` reports inside a container PID namespace.
 
 ### `hmn spill` — WDDM spill detection
 
@@ -468,7 +483,7 @@ same display string (e.g. `"12.0 GiB free < 12.0 GiB requested"`) still
 reads unambiguously. `free_bytes` nets out `reserved_bytes` **on the NVML
 path only** (see
 [Why does `used_bytes` exceed my card's total VRAM?](docs/FAQ.md#why-does-used_bytes-exceed-my-cards-total-vram));
-on the Windows `DXGI`-alone fallback it can over-state true free `VRAM`
+on `ROCm SMI` it is the library's total minus its used figure, and `reserved_bytes` is `None`; on the Windows `DXGI`-alone fallback it can over-state true free `VRAM`
 (a documented per-process lower bound on usage), and on macOS it's a
 static working-set budget, not a live gauge — `hmn fits` is exact on the
 common NVML/Windows path this was built and verified against, with those
@@ -599,6 +614,7 @@ Two consequences worth noting:
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `nvml` | yes | `NVML` dynamic load via `libloading` (Linux + Windows-`WDDM` device-wide) |
+| `rocm` | yes | AMD GPUs on Linux: device-wide and per-process `VRAM`, and the foreign-process listing, via `ROCm SMI` (`librocm_smi64.so.1`, loaded with `libloading`; asked after `NVML`; no-op on non-Linux) |
 | `dxgi` | yes | Windows per-process `VRAM` via `IDXGIAdapter3` (no-op on non-Windows) |
 | `pdh` | yes | Windows foreign-process `VRAM` listing (`\GPU Process Memory(*)\Dedicated Usage` + `Shared Usage`) and the `\GPU Adapter Memory(*)` counters backing `SpillTracker`'s live path, under `WDDM 2.0`+ (no-op on non-Windows; depends on `dxgi`). `SpillTracker` itself compiles everywhere regardless — without this feature it is simply never measurable. |
 | `metal` | yes | macOS device-wide GPU budget via `objc2-metal` (`MTLDevice.recommendedMaxWorkingSetSize`); no-op on non-macOS. RAM and per-process GPU paths are libSystem-only and unaffected by this flag. |
