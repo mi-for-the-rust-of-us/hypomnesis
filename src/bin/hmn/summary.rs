@@ -53,9 +53,9 @@ fn count_failure_line(err: &impl std::fmt::Display) -> String {
 ///   `hmn ps` skips one (since v0.2.15; v0.2.14 dropped it without a word).
 /// - `2` with nothing on stdout, `--json` included, when no device could
 ///   be read ([`format_none_readable_message`]) or the devices could not
-///   be counted ([`count_failure_line`]: an NVIDIA driver that is
-///   installed but fails to start, `Snapshot::all`'s
-///   `HypomnesisError::Nvml`), or `Snapshot::all` failed for another
+///   be counted ([`count_failure_line`]: an NVIDIA driver or an AMD `ROCm`
+///   SMI library that is installed but fails to start, `Snapshot::all`'s
+///   `HypomnesisError::Nvml` or `HypomnesisError::Rocm`), or `Snapshot::all` failed for another
 ///   reason (a `RAM` read; `hmn: <reason>`, which exited `1` through
 ///   `main`'s old `Ok`/`Err` fold). `1` is not used: `2` is `hmn ps`'s and
 ///   `hmn watch`'s "could not tell" too.
@@ -115,18 +115,18 @@ fn format_summary(snaps: &[Snapshot]) -> String {
         let total_mib = bytes_to_mib(dev.total_bytes);
         let name_suffix = device_name_suffix(dev.name.as_deref());
         // Driver/firmware carve-out, when the backend surfaced it (NVML
-        // R510+). It is a *subset* of `total_mib` (NVML's
+        // R510+; ROCm SMI reports none). It is a *subset* of `total_mib` (NVML's
         // `total = reserved + free + used`), so the parenthetical reads as
         // "of which N is reserved", not an addition on top — matching
         // `nvidia-smi -q -d MEMORY`'s separate `Total` / `Reserved` lines.
-        // Elided on backends that report `None` (DXGI, nvidia-smi, Metal,
-        // pre-R510).
+        // Elided on backends that report `None` (ROCm SMI, DXGI, nvidia-smi,
+        // Metal, pre-R510).
         let reserved_suffix = dev.reserved_bytes.map_or(String::new(), |r| {
             format!(" ({} MiB reserved)", bytes_to_mib(r))
         });
-        // NVIDIA driver version (NVML or nvidia-smi fallback). Elided on
-        // backends that don't expose an NVIDIA driver string (DXGI,
-        // Metal, non-NVIDIA adapters).
+        // Driver version (NVML, ROCm SMI or nvidia-smi fallback). Elided on
+        // backends that don't expose a driver string (DXGI, Metal,
+        // non-NVIDIA adapters).
         let driver_suffix = dev
             .driver_version
             .as_deref()

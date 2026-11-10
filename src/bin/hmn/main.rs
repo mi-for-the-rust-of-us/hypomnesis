@@ -7,13 +7,14 @@
 //!
 //! - `hmn` (default) — one line per visible GPU with free / total `VRAM`.
 //!   Uses [`hypomnesis::Snapshot::all`], so on Windows the AMD / Intel
-//!   `iGPU` surfaces alongside the NVIDIA dGPU(s); on macOS the Apple
+//!   `iGPU` surfaces alongside the NVIDIA dGPU(s); on Linux an AMD GPU
+//!   surfaces through `ROCm` SMI when `NVML` counts none; on macOS the Apple
 //!   Silicon `SoC` surfaces as a single `UMA` device. `--json` emits the
 //!   same data as a JSON array instead of text. A device that cannot be
 //!   read is named on stderr and skipped; when none can be read, or the
 //!   devices cannot be counted, it exits `2` with nothing on stdout.
 //! - `hmn ps` — list processes holding GPU memory across one or all
-//!   visible devices. On Linux (`NVML`) the list is compute-only; on
+//!   visible devices. On Linux (`NVML`, `ROCm` SMI) the list is compute-only; on
 //!   Windows (`PDH`, `WDDM 2.0`+) the list includes every GPU memory
 //!   holder (compositor, browsers, games, compute); on macOS (Metal
 //!   ledger) the list enumerates every process holding
@@ -82,9 +83,11 @@ mod watch;
                   `--json` emits the same data as a JSON array instead (fields: index, name, \
                   total_bytes, free_bytes, used_bytes, reserved_bytes, driver_version). A device \
                   that cannot be read is skipped with a stderr line ending `(skipped)`; when none \
-                  can be read, or the devices cannot be counted (an NVIDIA driver that is \
-                  installed but fails to start), it exits 2 with nothing on stdout, `--json` \
-                  included.\n\
+                  can be read, or the devices cannot be counted (an NVIDIA driver or an AMD \
+                  ROCm SMI library that is installed but fails to start), it exits 2 with \
+                  nothing on stdout, `--json` included. On Linux the devices are NVIDIA GPUs \
+                  read through NVML or, when NVML counts none, AMD GPUs read through ROCm SMI \
+                  (`librocm_smi64.so.1`); an AMD GPU's `reserved_bytes` is null.\n\
                   \n\
                   `hmn ps`: lists processes holding GPU memory.\n\
                   \n\
@@ -110,9 +113,15 @@ mod watch;
     // down. `-h` names where they are.
     after_help = "Per-platform limitations are listed at the end of `hmn --help`.",
     after_long_help = "Limitations (per-platform):\n\
-                  - Linux / NVML backend is compute-only — only processes with an active CUDA \
-                  context appear. Browsers using GPU compositing, games, and pure-graphics \
-                  apps do not.\n\
+                  - Linux / NVML and ROCm SMI backends are compute-only — only processes with \
+                  an active CUDA or ROCm compute context appear. Browsers using GPU \
+                  compositing, games, and pure-graphics apps do not.\n\
+                  - Linux / AMD GPUs are read through ROCm SMI after NVML and before \
+                  nvidia-smi; ROCm SMI has no subprocess fallback. The device index is the \
+                  library's enumeration order over the devices visible to the process, as \
+                  NVML's is the NVML-canonical order; scheduler GPU numbers are never read. \
+                  A ROCm SMI library that is installed but fails to start or count exits `2` \
+                  with `ROCm error: ...`, as a broken NVML does.\n\
                   - Windows / PDH backend (consumer WDDM 2.0+) lists EVERY GPU memory holder: \
                   the desktop compositor, browsers, games, and CUDA / compute alongside. The \
                   semantic shift from the Linux compute-only list is intentional and reflects \
@@ -209,7 +218,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// List processes holding GPU memory. On Linux: compute-only via
-    /// NVML. On Windows / WDDM 2.0+: every GPU memory holder via PDH
+    /// NVML or, for an AMD GPU, `ROCm` SMI. On Windows / WDDM 2.0+: every GPU memory holder via PDH
     /// (compositor, browsers, compute, etc.). On macOS: every
     /// process holding `graphics_footprint` ledger bytes that the
     /// sandbox lets it read (the sandbox, not process ownership, decides;
@@ -230,8 +239,10 @@ enum Commands {
         /// an empty table that would read as an idle card. Without
         /// `--device`, a device whose query fails is skipped with a stderr
         /// line ending `(skipped)`; when every device failed, or the
-        /// devices could not be counted (an NVIDIA driver that is
-        /// installed but fails to start), the exit is `2` with no table.
+        /// devices could not be counted (an NVIDIA driver or an AMD `ROCm` SMI
+        /// library that is installed but fails to start), the exit is `2`
+        /// with no table. The index is NVML's canonical order, or `ROCm` SMI's
+        /// enumeration order for an AMD GPU on Linux.
         #[arg(long, value_name = "INDEX")]
         device: Option<u32>,
         /// Hide rows below this total footprint (`used_bytes +
@@ -290,8 +301,8 @@ enum Commands {
         /// is an empty listing that skipped a failed device or left
         /// unreadable a process the filters could match, since `1` means
         /// nothing matched on every device queried and no process the
-        /// filters could match was unreadable. A machine with no NVIDIA
-        /// driver at all, or a job given no GPU, has no device to query:
+        /// filters could match was unreadable. A machine with no GPU
+        /// driver at all (neither NVIDIA's nor AMD's), or a job given no GPU, has no device to query:
         /// the summary says `(no GPU to list)`, and the exit is `1`.
         #[arg(long)]
         exit_status: bool,
@@ -316,7 +327,8 @@ enum Commands {
         /// clamped beyond the zero-floor.
         #[arg(long, value_name = "MS", default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
-        /// GPU index to watch (NVML-canonical ordering).
+        /// GPU index to watch (NVML-canonical ordering; `ROCm` SMI's
+        /// enumeration order for an AMD GPU on Linux).
         #[arg(long, value_name = "INDEX", default_value_t = 0)]
         device: u32,
         /// Also emit the `SpillReport` as a JSON object on stdout
@@ -442,7 +454,8 @@ enum Commands {
         /// Combining this with explicit PID(s) is a hard error (exit `2`).
         #[arg(long, value_name = "SIZE", value_parser = parse_size_bytes)]
         min: Option<u64>,
-        /// GPU index to watch (NVML-canonical ordering). One device per
+        /// GPU index to watch (NVML-canonical ordering; `ROCm` SMI's
+        /// enumeration order for an AMD GPU on Linux). One device per
         /// watch: on a multi-GPU node, `hmn ps` shows which GPU holds a
         /// process (its GPU column), and `hmn watch` says so at attach
         /// when the work is elsewhere.
@@ -495,7 +508,8 @@ enum Commands {
         /// byte count, or a decimal number with `KiB`/`MiB`/`GiB`.
         #[arg(value_name = "SIZE", value_parser = parse_size_bytes)]
         size: u64,
-        /// GPU index to check (NVML-canonical ordering).
+        /// GPU index to check (NVML-canonical ordering; `ROCm` SMI's
+        /// enumeration order for an AMD GPU on Linux).
         #[arg(long, value_name = "INDEX", default_value_t = 0)]
         device: u32,
     },

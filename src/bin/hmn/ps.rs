@@ -34,7 +34,8 @@ pub struct PsRow {
     /// Resident shared-system-memory bytes — the `WDDM` spill signal.
     /// `0` on non-Windows backends (no shared-residency counter).
     pub shared_used_bytes: u64,
-    /// Zero-based device index (NVML-canonical).
+    /// Zero-based device index (NVML-canonical; `ROCm` SMI's enumeration
+    /// order for an AMD GPU on Linux).
     pub device_index: u32,
     /// Friendly device name (e.g. `RTX 5060 Ti`); `None` when
     /// `device_info` failed for this index, or gave no name (the
@@ -159,7 +160,8 @@ pub const fn paged_and_share(
 /// the device verdict does not depend on what is displayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceSpill {
-    /// Zero-based device index (`NVML`-canonical).
+    /// Zero-based device index (`NVML`-canonical; `ROCm` SMI's enumeration
+    /// order for an AMD GPU on Linux).
     pub index: u32,
     /// The device's free `VRAM` in bytes, from `device_info`. `None`
     /// when that query failed.
@@ -186,7 +188,7 @@ pub struct SummaryNotes {
     pub unreadable: usize,
     /// No `--device` was given and there was no device to list:
     /// `device_count` counted zero (a job given no GPU) or found no count
-    /// source (no NVIDIA driver). The summary says so, since
+    /// source (no NVIDIA or AMD driver library). The summary says so, since
     /// `0 GPU processes found` alone would read as an idle GPU.
     pub no_devices: bool,
 }
@@ -220,7 +222,8 @@ pub struct PsFilters {
     /// lists every PID. Deduplicated, in the order given, by
     /// [`Self::new`].
     pub pids: Vec<u32>,
-    /// `--device`: list only this GPU index (`NVML`-canonical). `None`
+    /// `--device`: list only this GPU index (`NVML`-canonical, or `ROCm`
+    /// SMI's enumeration order for an AMD GPU on Linux). `None`
     /// lists every device `device_count` reports. Chooses which devices
     /// are enumerated rather than testing rows, so [`Self::judge`] does
     /// not look at it.
@@ -466,10 +469,10 @@ const fn ps_exit_code(
 ///
 /// Without `--device`, the devices to try come from `device_count()`, whose
 /// two errors mean different things. `NoGpuSource` (no count source
-/// installed, as on a machine without an NVIDIA driver) leaves no device to
+/// installed, as on a machine without an NVIDIA or AMD driver library) leaves no device to
 /// try: nothing was skipped, and the empty listing exits `0`, or `1` under
 /// `exit_status`, as a machine without GPUs should. Any other error (an
-/// `NVML` library that loaded but could not start or count) prints
+/// `NVML` or `ROCm` SMI library that loaded but could not start or count) prints
 /// `device_count_failure_line` and `ALL_DEVICES_FAILED_LINE` and exits `2`
 /// with nothing on stdout, as when every device failed: the GPUs may be
 /// there, and an empty listing would read as "idle" (since v0.2.15).
@@ -702,7 +705,7 @@ pub fn remedy_clause(protected: usize, unreadable: usize, outside_sandbox: bool)
 ///   `outside_sandbox == true`) joined by `; `. When both counts are
 ///   non-zero they share one clause and say the remedy once
 ///   (`U unreadable, M protected — re-run outside the sandbox`). A row
-///   counts as protected when `name.is_none()` (`NVML`'s
+///   counts as protected when `name.is_none()` (`NVML`'s or `ROCm` SMI's
 ///   `/proc/<pid>/comm` unreadable on Linux; on macOS when no source gave a
 ///   name, as when a sandbox refuses both `proc_pidpath` and
 ///   `KERN_PROC_PID` — see [`hypomnesis::GpuProcessEntry::name`] and README
