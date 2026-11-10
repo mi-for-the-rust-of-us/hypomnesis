@@ -241,7 +241,7 @@ and the other platforms honestly cannot exhibit or measure it:
 
 | Platform | Why not |
 |---|---|
-| Linux | Normal `CUDA` gets an **OOM** rather than silent paging; `NVML` has no shared-residency field (managed/`UVM` migration is per-allocation, not per-process) |
+| Linux | Normal `CUDA` gets an **OOM** rather than silent paging; `NVML` has no shared-residency field (managed/`UVM` migration is per-allocation, not per-process). On AMD GPUs the `ROCm SMI` backend reads no shared-residency figure either, so spill is not measured |
 | macOS / Apple Silicon | `UMA` — one physical pool; there is nothing to spill *into* |
 
 `SpillTracker` still compiles and constructs everywhere (portable consumers
@@ -434,6 +434,12 @@ named rather than papered over:
   `0xFFFFFFFFFFFFFFFF` for every process's memory via `NVML`; hypomnesis
   detects the sentinel (and `used > total` corruption) per-row and falls back
   to `nvidia-smi` rather than reporting garbage.
+
+On AMD GPUs (Linux), the per-process figure is
+`rsmi_compute_process_info_by_device_get`, read per device (`rocm-smi --showpids`
+prints the sum over devices). On an 8×MI300X node with ROCm 7.2.4 it came
+within 1 MiB of the device's own used-VRAM delta. `ROCm SMI` reports no
+driver-reserved figure, so `reserved_bytes` is `None`.
 
 Also remember the *semantic* differences across backends: Windows `PDH`
 `used_bytes` is commit; macOS `graphics_footprint` and the shared column are
