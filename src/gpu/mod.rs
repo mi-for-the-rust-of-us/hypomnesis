@@ -1146,17 +1146,21 @@ mod tests {
     }
 
     #[test]
-    fn count_verdict_follows_the_linux_count_rule() {
+    fn count_verdict_lets_a_positive_count_stand_nvml_first() {
         let broken = |call: &str| Err(Some(HypomnesisError::Nvml(call.to_owned())));
         let rocm_broken = |call: &str| Err(Some(HypomnesisError::Rocm(call.to_owned())));
-        // A positive count stands, NVML's first.
         assert!(matches!(count_verdict(Ok(2), Ok(8)), Ok(2)));
         assert!(matches!(count_verdict(Ok(2), Err(None)), Ok(2)));
         assert!(matches!(count_verdict(Ok(2), rocm_broken("rocm")), Ok(2)));
         assert!(matches!(count_verdict(Ok(0), Ok(8)), Ok(8)));
         assert!(matches!(count_verdict(Err(None), Ok(8)), Ok(8)));
         assert!(matches!(count_verdict(broken("nvml"), Ok(8)), Ok(8)));
-        // A zero never stands over a broken library, from either side.
+    }
+
+    #[test]
+    fn count_verdict_never_lets_a_zero_stand_over_a_broken_library() {
+        let broken = |call: &str| Err(Some(HypomnesisError::Nvml(call.to_owned())));
+        let rocm_broken = |call: &str| Err(Some(HypomnesisError::Rocm(call.to_owned())));
         assert!(matches!(
             count_verdict(broken("nvml"), Ok(0)),
             Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
@@ -1165,7 +1169,12 @@ mod tests {
             count_verdict(Ok(0), rocm_broken("rocm")),
             Err(Some(HypomnesisError::Rocm(ref s))) if s == "rocm"
         ));
-        // Otherwise the first broken detail, NVML's first.
+    }
+
+    #[test]
+    fn count_verdict_names_the_first_broken_detail_nvml_first() {
+        let broken = |call: &str| Err(Some(HypomnesisError::Nvml(call.to_owned())));
+        let rocm_broken = |call: &str| Err(Some(HypomnesisError::Rocm(call.to_owned())));
         assert!(matches!(
             count_verdict(broken("nvml"), rocm_broken("rocm")),
             Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
@@ -1178,6 +1187,10 @@ mod tests {
             count_verdict(broken("nvml"), Err(None)),
             Err(Some(HypomnesisError::Nvml(ref s))) if s == "nvml"
         ));
+    }
+
+    #[test]
+    fn count_verdict_falls_back_to_a_zero_then_to_no_library() {
         // Otherwise a zero.
         assert!(matches!(count_verdict(Ok(0), Ok(0)), Ok(0)));
         assert!(matches!(count_verdict(Ok(0), Err(None)), Ok(0)));

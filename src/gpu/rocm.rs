@@ -775,18 +775,17 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
         // matches its layout (see the layout test).
         let ret = unsafe { get_by_device(pid, idx, &raw mut process_info) };
         if ret == RSMI_STATUS_SUCCESS {
-            DeviceRead::Bytes(process_info.vram_usage)
+            return DeviceRead::Bytes(process_info.vram_usage);
+        }
+        #[cfg(feature = "debug-output")]
+        eprintln!(
+            "[ROCm debug] rsmi_compute_process_info_by_device_get(pid={pid}, idx={idx}) \
+             returned {ret}"
+        );
+        if ret == RSMI_STATUS_NOT_FOUND {
+            DeviceRead::Gone
         } else {
-            #[cfg(feature = "debug-output")]
-            eprintln!(
-                "[ROCm debug] rsmi_compute_process_info_by_device_get(pid={pid}, idx={idx}) \
-                 returned {ret}"
-            );
-            if ret == RSMI_STATUS_NOT_FOUND {
-                DeviceRead::Gone
-            } else {
-                DeviceRead::Failed
-            }
+            DeviceRead::Failed
         }
     });
 
