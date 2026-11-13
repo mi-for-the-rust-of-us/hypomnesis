@@ -2,9 +2,8 @@
 
 > *Measure the AMD GPU the way `hmn` measures the NVIDIA one, and say where the two differ.*
 
-**Status: in progress.** The scope was settled on 2026-11-09 (see *Decisions taken*). The error
-seams and the dogfooding report are on `main`; the backend, its wiring, its tests and the parity
-documentation follow, one commit per item.
+**Status: in progress.** The scope was settled on 2026-11-09 (see *Decisions taken*); no version
+bump until release.
 
 ---
 
@@ -174,6 +173,7 @@ cgroups) ticks, or, for a library-level row, the measurement that was taken ther
 | The bytes track the device | within 1 MiB of the device's used-VRAM delta (measured: -77824, -94208 and -98304 B) |
 | The ABI is the header's | `rsmi_process_info_t` is 32 bytes at the offsets above, and `rsmi_status_t`, `rsmi_memory_type_t` and `rsmi_sw_component_t` are 4; 200 init, shutdown and `dlclose` cycles ran with no non-zero return (measured, in C) |
 | A host with the ROCm userland and no AMD driver is not broken | `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8) there (measured); `hmn` prints `no visible GPUs.` and exits `0` |
+| A job granted no GPU on an AMD node | `hmn` prints `no visible GPUs.` and exits `0` |
 | `hmn`, `hmn --json` | names the GPU, total, used and free, and the driver version; shows no reserved parenthetical; exit `0` |
 | `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with VRAM on each device, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
 | `hmn watch` (PID, `--follow-new`, `--filter`, `--min`) | the same rows sampled over time; the spill line reads "not measurable" |
@@ -185,9 +185,9 @@ cgroups) ticks, or, for a library-level row, the measurement that was taken ther
 | The gate set passes on both CI toolchains | `cargo fmt --check`, both `--no-default-features` checks, clippy with default and all features, `cargo test --all-features`, and the doc matrix of v0.2.15 |
 | The links hold | every relative link and anchor in the touched docs resolves |
 
-Not claimed, because no run covered it: a job granted no GPU on an AMD node, another user's process
-on a GPU the caller can see, NVIDIA's per-device listing under device cgroups, other AMD GPUs, other
-ROCm releases, and an AMD iGPU.
+Not claimed, because no run covered it: another user's process on a GPU the caller can see,
+NVIDIA's per-device listing under device cgroups, other AMD GPUs, other ROCm releases, and an AMD
+iGPU.
 
 ---
 
