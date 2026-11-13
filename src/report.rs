@@ -140,7 +140,8 @@ impl MemoryReport {
     /// Short qualifier string indicating `VRAM` measurement scope.
     ///
     /// Returns `" [per-process]"` when the after-snapshot's per-process
-    /// reading is genuinely per-process (`DXGI` or `NVML`),
+    /// reading is genuinely per-process (`DXGI`, `NVML` or `ROCm` SMI,
+    /// whose readings set `is_per_process`),
     /// `" [device-wide]"` when it fell back to `nvidia-smi`, or `""`
     /// when no `VRAM` data is available.
     const fn vram_qualifier(&self) -> &'static str {

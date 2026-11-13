@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> *AMD GPUs on Linux, read the way NVIDIA GPUs are.*
+
+Adds a `ROCm` SMI backend, so `hmn` and the library read AMD GPUs on Linux where they read an
+absent GPU before: a field check on an AMD Instinct MI300X node (`ROCm` 7.2.4) found `hmn` printing
+`hmn: no visible GPUs.` and exiting `0` beside a 4 GiB allocation, for which `rocm-smi` and `amd-smi`
+both reported the same per-process figure, 4445999104 B, within 80 KiB of the device-wide delta
+([`docs/dogfooding-feedbacks/dogfooding-amd-gpu-reads-as-no-gpu.md`](docs/dogfooding-feedbacks/dogfooding-amd-gpu-reads-as-no-gpu.md)).
+The parity claim is Linux only and is written down row by row in the README, in
+[AMD GPUs on Linux: parity with NVIDIA](README.md#amd-gpus-on-linux-parity-with-nvidia). Plan:
+[`docs/roadmap-v0.2.16.md`](docs/roadmap-v0.2.16.md).
+
+### Added
+
+- **A `ROCm` SMI backend** (`src/gpu/rocm.rs`, `src/gpu/mod.rs`) — loads `librocm_smi64.so.1`
+  through `libloading` and reads device name, total, used and free memory and the driver version
+  (`rsmi_version_str_get`) per device, the memory a process holds on a device
+  (`rsmi_compute_process_info_by_device_get`), and the compute processes on each device
+  (`rsmi_compute_process_info_get` with `rsmi_compute_process_gpus_get`, compute-only, names from
+  `/proc`). On Linux the dispatchers ask it after `NVML` and before `nvidia-smi`. `reserved_bytes`
+  is `None` and spill is not measurable, as on any Linux source that lacks them.
+- **`GpuQuerySource::Rocm`** (`src/snapshot.rs`) — the `source` of rows read through `ROCm` SMI.
+- **`HypomnesisError::Rocm`** (`src/error.rs`) — a `ROCm` SMI library that loads but fails to start
+  or answer, reading `ROCm error: …`. `hmn` and `hmn ps` both exit `2` on it, with nothing on
+  stdout, as they do on `HypomnesisError::Nvml`.
+- **The `rocm` feature**, in the default set (`Cargo.toml`) — depends on `libloading` only, like
+  `nvml`; a no-op off Linux, and a host without ROCm is unaffected.
+- **`tests/cli_fake_rocm.rs` and `tests/live_rocm.rs`** — a fake `ROCm` SMI library
+  (`tests/fixtures/rocm_smi_fake.c`) runs the `hmn` paths in CI with no AMD GPU; the live tests
+  are `#[ignore]`-gated and need one.
+- **`README.md`: the subsection "AMD GPUs on Linux: parity with NVIDIA"**, the `rocm` badge,
+  Install and Feature Flags entries, and a Limitations item. `.github/workflows/ci.yml`: the
+  library-only `cargo check` names `rocm`.
+
+### Changed
+
+- **`NoGpuSource` names `ROCm` on Linux** (`src/error.rs`) — its text reads `no GPU measurement
+  source available (NVML, ROCm, and nvidia-smi all failed or are disabled)`. Windows and macOS keep
+  their text, and a platform that is none of the three keeps the two-backend text. Matching on the
+  variant is unaffected.
+- **The Linux device count follows a rule across `NVML` and `ROCm` SMI** (`src/gpu/mod.rs`) — a
+  positive count stands, `NVML`'s first; otherwise the first library that failed, `NVML`'s first;
+  otherwise a zero; otherwise `NoGpuSource`. A zero never stands over a broken library, as in the
+  `DXGI` rule. `ROCm` SMI is asked only when `NVML`'s count is not positive. An NVIDIA userland on a
+  host whose GPUs are all AMD therefore does not hide them behind a count of zero. Mixed-vendor
+  hosts are unsupported.
+- **`hmn` names a failed `ROCm` count** (`src/bin/hmn/summary.rs`) — `hmn: failed to count devices:
+  ROCm error: …`, as for `NVML`.
+
 ## [0.2.15] - 2026-10-27
 
 Answers a field check of v0.2.14 on two multi-GPU Linux nodes, 8× V100 and 2× H100 NVL under

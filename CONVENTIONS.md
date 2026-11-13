@@ -259,6 +259,7 @@ Every `unsafe` block must be **scoped, annotated, and feature-gated**.
 | `dxgi` | DXGI COM calls in `src/gpu/dxgi.rs` (Windows-only) |
 | `pdh` | PDH counter API (`PdhOpenQueryW` / `PdhEnumObjectItemsW` / `PdhAddCounterW` / `PdhCollectQueryData` / `PdhGetFormattedCounterValue`) for the `GPU Process Memory` and `GPU Adapter Memory` counter sets, plus `OpenProcess` + `QueryFullProcessImageNameW` name lookup and (v0.2.8) `CreateToolhelp32Snapshot` + `Process32FirstW`/`Process32NextW` as its batched fallback, in `src/gpu/pdh.rs` (Windows-only). The v0.2.5 spill module (`src/spill.rs`) contains **no** `unsafe` of its own — it delegates to this backend. |
 | `metal` | `objc2-metal` `MTLDevice` calls in `src/gpu/metal.rs` (macOS-only) |
+| `rocm` | ROCm SMI dynamic load (`librocm_smi64.so.1`) and FFI in `src/gpu/rocm.rs` (Linux-only) |
 
 Each accepted use must satisfy all of:
 
@@ -285,9 +286,9 @@ Used for stable Windows API functions whose ABI is well-known
 function signatures inline. Each declared function gets a doc comment
 linking to the Microsoft documentation page.
 
-**Pattern 2 — `libloading::Library::new` + symbol lookup (NVML).**
-Used for NVML, which is loaded at runtime so the crate works even when
-the NVIDIA driver is absent. `unsafe` is required at three points:
+**Pattern 2 — `libloading::Library::new` + symbol lookup (NVML, ROCm SMI).**
+Used for NVML and for ROCm SMI (`librocm_smi64.so.1`), which are loaded at
+runtime so the crate works even when the NVIDIA or AMD driver is absent. `unsafe` is required at three points:
 library load, symbol lookup, and call. Conventions:
 
 - Hold the `Library` for the duration of all calls; don't load and
@@ -300,7 +301,9 @@ library load, symbol lookup, and call. Conventions:
   — its symbols borrow it, so the compiler rejects any `NVML` call
   after that line.
 - Treat `nvmlReturn_t` constants (`NVML_SUCCESS = 0`,
-  `NVML_ERROR_INSUFFICIENT_SIZE = 7`) as named consts, not magic numbers.
+  `NVML_ERROR_INSUFFICIENT_SIZE = 7`) and `rsmi_status_t` constants
+  (`RSMI_STATUS_SUCCESS = 0`, `RSMI_STATUS_INIT_ERROR = 8`) as named
+  consts, not magic numbers.
 
 **Pattern 3 — `windows` crate COM (`IDXGIFactory1` → `IDXGIAdapter3`).**
 Used for DXGI on Windows. The `windows` crate handles refcounting via
@@ -398,8 +401,8 @@ Rules:
 - Use lowercase, no trailing period.
 - Include the offending value and the valid range when applicable.
 - Wrap external errors with `: {e}`, not `.to_string()`.
-- For NVML return codes, name the code (`NVML_ERROR_*`) where possible;
-  fall back to the numeric value when the code is unknown to us.
+- For NVML and ROCm SMI return codes, name the code (`NVML_ERROR_*`,
+  `RSMI_STATUS_*`) where possible; fall back to the numeric value when the code is unknown to us.
 
 ---
 
@@ -419,7 +422,7 @@ Cargo feature:
 | `debug-output` | (cross-cutting) | v0.1 | none |
 | `test-helpers` | (builders in `src/snapshot.rs`, `src/spill.rs`) | v0.2.1 | none |
 | `cli` | `src/bin/hmn/` (`main.rs` + one module per subcommand, since v0.2.12) | v0.2.0 (default-on since v0.2.8) | `clap`, `ctrlc` |
-| `rocm` (future) | `src/gpu/rocm.rs` | — | TBD |
+| `rocm` | `src/gpu/rocm.rs` (Linux only) | v0.2.16 | `libloading` (shared with `nvml`) |
 
 Adding a new backend (for a new GPU vendor or new measurement source) is
 a five-step recipe:
@@ -436,7 +439,8 @@ a five-step recipe:
    so this is non-breaking) and update the smoke tests.
 
 Default features (`nvml`, `nvidia-smi-fallback`, `dxgi`, `pdh`, `metal`,
-`cli`) cover the ecosystem's most common case (NVIDIA on Windows or
-Linux, Apple Silicon on macOS, plus the `hmn` CLI binary itself).
+`rocm`, `cli`) cover the ecosystem's most common case (NVIDIA on Windows
+or Linux, AMD on Linux, Apple Silicon on macOS, plus the `hmn` CLI binary
+itself).
 Disabling defaults yields a nearly empty crate that compiles to almost
 nothing — useful for callers that only want process RSS.

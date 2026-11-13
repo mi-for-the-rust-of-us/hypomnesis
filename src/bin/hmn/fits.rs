@@ -9,8 +9,9 @@ use crate::format::{device_name_suffix, format_vram, format_vram_precise};
 
 /// Run the `fits` subcommand: compare `size` against `device`'s current
 /// free `VRAM` and print one line to stderr either way. `free_bytes`
-/// nets out `reserved_bytes` **on the NVML path only** — `DXGI`-alone,
-/// `nvidia-smi`, and Metal backends all leave `reserved_bytes: None`,
+/// nets out `reserved_bytes` **on the NVML path only** — `ROCm` SMI,
+/// `DXGI`-alone, `nvidia-smi`, and Metal backends all leave
+/// `reserved_bytes: None`,
 /// and on Windows without NVML `free_bytes` is derived from a
 /// documented per-process *lower bound* on usage (see
 /// [`hypomnesis::device_info`]'s "Imprecision note"), so it can

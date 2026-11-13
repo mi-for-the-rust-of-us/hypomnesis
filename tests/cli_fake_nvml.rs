@@ -182,6 +182,18 @@ impl FakeNvml {
         #[cfg(windows)]
         std::fs::copy(env!("CARGO_BIN_EXE_hmn"), fake.lib().join("hmn.exe"))
             .expect("failed to copy hmn.exe beside the fake");
+
+        // With the fake reporting no driver, `hmn` must see no GPU: one it
+        // still counts belongs to a real ROCm stack (Linux; on Windows the
+        // real-driver check above stands).
+        #[cfg(target_os = "linux")]
+        {
+            let probe = fake.hmn(&[], &[("FAKE_NVML_INIT", "9")]);
+            if probe.stdout.lines().any(|line| line.starts_with("GPU ")) {
+                skip(test, "a real ROCm stack answers on this host");
+                return None;
+            }
+        }
         Some(fake)
     }
 
@@ -388,8 +400,8 @@ fn nvml_codes_that_mean_no_gpu_read_as_no_gpu() {
     // With the driver not loaded, Linux has no count source left; Windows
     // falls through to `DXGI`, which counts zero NVIDIA adapters.
     #[cfg(target_os = "linux")]
-    let line = "hmn: ps failed to query device 0: no GPU measurement source available (NVML and \
-                nvidia-smi both failed or are disabled)";
+    let line = "hmn: ps failed to query device 0: no GPU measurement source available (NVML, \
+                ROCm, and nvidia-smi all failed or are disabled)";
     #[cfg(windows)]
     let line = "hmn: ps failed to query device 0: device index 0 out of range (have 0 devices)";
     let run = fake.hmn(&["ps", "--device", "0"], &[("FAKE_NVML_INIT", "9")]);
@@ -445,7 +457,7 @@ fn summary_exits_2_with_the_reason_when_nvml_cannot_start() {
 /// The skip line `hmn` prints for a lost device, with Linux's backends.
 #[cfg(target_os = "linux")]
 const LOST_DEVICE_1_SKIP: &str = "hmn: failed to query device 1: no GPU measurement source \
-     available (NVML and nvidia-smi both failed or are disabled) (skipped)";
+     available (NVML, ROCm, and nvidia-smi all failed or are disabled) (skipped)";
 
 /// The line the fake's one working H100 gives in `hmn`'s summary.
 const H100_LINE: &str =
@@ -532,8 +544,8 @@ fn a_device_whose_process_list_fails_is_listed_by_hmn_and_skipped_by_ps() {
     assert!(
         has_line(
             &run.stderr,
-            "hmn: ps failed to query device 0: no GPU measurement source available (NVML and \
-             nvidia-smi both failed or are disabled) (skipped)"
+            "hmn: ps failed to query device 0: no GPU measurement source available (NVML, \
+             ROCm, and nvidia-smi all failed or are disabled) (skipped)"
         ),
         "stderr: {}",
         run.stderr
@@ -595,8 +607,8 @@ fn ps_skips_a_lost_device_naming_the_linux_backends() {
     assert!(
         has_line(
             &run.stderr,
-            "hmn: ps failed to query device 1: no GPU measurement source available (NVML and \
-             nvidia-smi both failed or are disabled) (skipped)"
+            "hmn: ps failed to query device 1: no GPU measurement source available (NVML, \
+             ROCm, and nvidia-smi all failed or are disabled) (skipped)"
         ),
         "stderr: {}",
         run.stderr

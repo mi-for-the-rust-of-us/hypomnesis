@@ -28,6 +28,7 @@ fn public_types_are_reachable_via_crate_root() {
     let _: GpuQuerySource = GpuQuerySource::Nvml;
     let _: GpuQuerySource = GpuQuerySource::NvidiaSmi;
     let _: GpuQuerySource = GpuQuerySource::Metal;
+    let _: GpuQuerySource = GpuQuerySource::Rocm;
     let _: HypomnesisError = HypomnesisError::NoGpuSource;
 }
 
@@ -180,6 +181,7 @@ fn gpu_processes_returns_result_or_no_gpu_source() {
                             | GpuQuerySource::Pdh
                             | GpuQuerySource::NvidiaSmi
                             | GpuQuerySource::Metal
+                            | GpuQuerySource::Rocm
                     ),
                     "unexpected source {:?} on a gpu_processes row",
                     row.source
