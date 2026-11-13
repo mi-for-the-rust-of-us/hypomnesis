@@ -572,6 +572,17 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
     })
 }
 
+/// What one `rsmi_compute_process_info_by_device_get` call said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceRead {
+    /// The process's bytes on the device.
+    Bytes(u64),
+    /// The process exited (`RSMI_STATUS_NOT_FOUND`); it has no row.
+    Gone,
+    /// The call failed with any other code.
+    Failed,
+}
+
 /// The rows of one device's process listing: `(pid, used_bytes)` for each
 /// process whose device list (`rsmi_compute_process_gpus_get`) includes
 /// `idx`, with the bytes `by_device` reports for that PID on the device
@@ -579,18 +590,24 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
 ///
 /// The list call's own `vram_usage` is zero and the per-PID total sums every
 /// device, so neither is a figure for one device. Every PID is checked,
-/// whoever owns it. `by_device` is asked only for PIDs on the device; `None`
-/// when it fails for any of them, so a failed call is never an empty listing.
+/// whoever owns it. `by_device` is asked only for PIDs on the device. A PID
+/// it reports [`DeviceRead::Gone`] has no row; `None` when it fails for any
+/// other reason, so a failed call is never an empty listing.
 fn rows_on_device(
     idx: u32,
     procs: &[(u32, Vec<u32>)],
-    by_device: impl Fn(u32) -> Option<u64>,
+    by_device: impl Fn(u32) -> DeviceRead,
 ) -> Option<Vec<(u32, u64)>> {
-    procs
-        .iter()
-        .filter(|(_, devices)| devices.contains(&idx))
-        .map(|&(pid, _)| by_device(pid).map(|bytes| (pid, bytes)))
-        .collect()
+    let mut rows = Vec::new();
+    for &(pid, _) in procs.iter().filter(|(_, devices)| devices.contains(&idx)) {
+        match by_device(pid) {
+            DeviceRead::Bytes(bytes) => rows.push((pid, bytes)),
+            // EXPLICIT: the process exited after the host listing; it has no row.
+            DeviceRead::Gone => {}
+            DeviceRead::Failed => return None,
+        }
+    }
+    Some(rows)
 }
 
 /// Enumerate every compute process on the given device, returning
@@ -605,9 +622,13 @@ fn rows_on_device(
 /// Both list calls follow the library's two-call size protocol: a null buffer
 /// returns the count, then a buffer of that many entries is filled.
 ///
+/// A process can exit after the host listing. `RSMI_STATUS_NOT_FOUND` from
+/// either per-PID call means it is gone, and it has no row, as in `NVML`'s
+/// per-device listing.
+///
 /// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
-/// not resolve, any call fails (the device count's included), or `idx` is not
-/// below the device count; never an empty `Vec` for a failed call.
+/// not resolve, any other call fails (the device count's included), or `idx`
+/// is not below the device count; never an empty `Vec` for a failed call.
 #[allow(unsafe_code)]
 #[must_use]
 pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
@@ -693,6 +714,14 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
             // SAFETY: with a null buffer, rsmi_compute_process_gpus_get
             // writes only the number of devices to `num_devices`.
             let ret = unsafe { get_gpus(pid, std::ptr::null_mut(), &raw mut num_devices) };
+            if ret == RSMI_STATUS_NOT_FOUND {
+                // EXPLICIT: the process exited; no devices, so it gets no row.
+                #[cfg(feature = "debug-output")]
+                eprintln!(
+                    "[ROCm debug] pid={pid} exited before rsmi_compute_process_gpus_get(size)"
+                );
+                return Some((pid, Vec::new()));
+            }
             if ret != RSMI_STATUS_SUCCESS {
                 #[cfg(feature = "debug-output")]
                 eprintln!(
@@ -720,6 +749,12 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
             // number written. The buffer holds exactly the count the size
             // call reported.
             let ret = unsafe { get_gpus(pid, devices.as_mut_ptr(), &raw mut num_devices) };
+            if ret == RSMI_STATUS_NOT_FOUND {
+                // EXPLICIT: the process exited; no devices, so it gets no row.
+                #[cfg(feature = "debug-output")]
+                eprintln!("[ROCm debug] pid={pid} exited before rsmi_compute_process_gpus_get");
+                return Some((pid, Vec::new()));
+            }
             if ret != RSMI_STATUS_SUCCESS {
                 #[cfg(feature = "debug-output")]
                 eprintln!("[ROCm debug] rsmi_compute_process_gpus_get(pid={pid}) returned {ret}");
@@ -740,14 +775,18 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
         // matches its layout (see the layout test).
         let ret = unsafe { get_by_device(pid, idx, &raw mut process_info) };
         if ret == RSMI_STATUS_SUCCESS {
-            Some(process_info.vram_usage)
+            DeviceRead::Bytes(process_info.vram_usage)
         } else {
             #[cfg(feature = "debug-output")]
             eprintln!(
                 "[ROCm debug] rsmi_compute_process_info_by_device_get(pid={pid}, idx={idx}) \
                  returned {ret}"
             );
-            None
+            if ret == RSMI_STATUS_NOT_FOUND {
+                DeviceRead::Gone
+            } else {
+                DeviceRead::Failed
+            }
         }
     });
 
@@ -912,7 +951,13 @@ mod tests {
     fn rows_on_device_reports_the_device_figure() {
         // A process on devices 0 and 1; the row carries the by-device figure.
         let procs = [(4242, vec![0, 1])];
-        let rows = rows_on_device(1, &procs, |pid| (pid == 4242).then_some(2_298_515_456));
+        let rows = rows_on_device(1, &procs, |pid| {
+            if pid == 4242 {
+                DeviceRead::Bytes(2_298_515_456)
+            } else {
+                DeviceRead::Failed
+            }
+        });
         assert_eq!(rows, Some(vec![(4242, 2_298_515_456)]));
     }
 
@@ -921,7 +966,7 @@ mod tests {
         // One process on device 1, one whose device list lacks it: only the
         // first is kept, whoever owns either.
         let procs = [(4242, vec![0, 1]), (4343, vec![0])];
-        let rows = rows_on_device(1, &procs, |_| Some(2_298_515_456));
+        let rows = rows_on_device(1, &procs, |_| DeviceRead::Bytes(2_298_515_456));
         assert_eq!(rows, Some(vec![(4242, 2_298_515_456)]));
     }
 
@@ -930,7 +975,13 @@ mod tests {
         // A failed read for a process on the device is a failed listing, not
         // a listing without that process.
         let procs = [(4242, vec![1]), (4343, vec![1])];
-        let rows = rows_on_device(1, &procs, |pid| (pid == 4242).then_some(2_298_515_456));
+        let rows = rows_on_device(1, &procs, |pid| {
+            if pid == 4242 {
+                DeviceRead::Bytes(2_298_515_456)
+            } else {
+                DeviceRead::Failed
+            }
+        });
         assert_eq!(rows, None);
     }
 }
