@@ -435,14 +435,131 @@ pub(super) struct RocmQueryResult {
     pub driver_version: Option<String>,
 }
 
+/// Read the adapter name via `rsmi_dev_name_get`.
+///
+/// Best-effort: `None` when the symbol does not resolve, the call fails, or
+/// the name is empty. Caller must already hold an open `RocmSession`.
+#[allow(unsafe_code)]
+fn read_device_name(lib: &libloading::Library, idx: u32) -> Option<String> {
+    // SAFETY: symbol lookup for rsmi_dev_name_get. The name matches the ROCm
+    // SMI C API and the signature alias matches the header. Absence of the
+    // symbol is mapped to None via `.ok()?`, so the caller reports no name.
+    let get_name: libloading::Symbol<'_, RsmiDevNameGetFn> =
+        unsafe { lib.get(b"rsmi_dev_name_get\0") }.ok()?;
+
+    let mut name_buf = [0_u8; ROCM_DEVICE_NAME_BUFFER_SIZE];
+    // SAFETY: rsmi_dev_name_get writes a null-terminated C string into
+    // name_buf, up to `len` bytes, `len` being a size_t. The buffer is
+    // stack-allocated and ROCM_DEVICE_NAME_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_name(
+            idx,
+            name_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            ROCM_DEVICE_NAME_BUFFER_SIZE,
+        )
+    };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_dev_name_get returned {ret}");
+        return None;
+    }
+    let nul_pos = name_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name_buf.len());
+    // BORROW: explicit String::from_utf8_lossy + into_owned — name_buf
+    // is stack-local; we need an owned String to return.
+    name_buf
+        .get(..nul_pos)
+        .map(|slice| String::from_utf8_lossy(slice).into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the driver version via `rsmi_version_str_get` for
+/// `RSMI_SW_COMP_DRIVER`.
+///
+/// System-level (not device-scoped): the same value regardless of device
+/// index. Best-effort: `None` when the symbol does not resolve, the call
+/// fails, or the string is empty. Caller must already hold an open
+/// `RocmSession`.
+#[allow(unsafe_code)]
+fn read_driver_version(lib: &libloading::Library) -> Option<String> {
+    // SAFETY: symbol lookup for rsmi_version_str_get. The name matches the
+    // ROCm SMI C API and the signature alias matches the header. Absence of
+    // the symbol is mapped to None via `.ok()?`, so the caller reports no
+    // driver version.
+    let get_version: libloading::Symbol<'_, RsmiVersionStrGetFn> =
+        unsafe { lib.get(b"rsmi_version_str_get\0") }.ok()?;
+
+    let mut version_buf = [0_u8; ROCM_VERSION_BUFFER_SIZE];
+    // CAST: usize → u32, ROCM_VERSION_BUFFER_SIZE = 80 fits in u32
+    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+    let version_len = ROCM_VERSION_BUFFER_SIZE as u32;
+    // SAFETY: rsmi_version_str_get writes a null-terminated C string into
+    // version_buf, up to `version_len` bytes, a uint32_t. The buffer is
+    // stack-allocated and ROCM_VERSION_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_version(
+            RSMI_SW_COMP_DRIVER,
+            version_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            version_len,
+        )
+    };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_version_str_get returned {ret}");
+        return None;
+    }
+    let nul_pos = version_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(version_buf.len());
+    // BORROW: explicit String::from_utf8_lossy + into_owned — version_buf
+    // is stack-local; we need an owned String to return.
+    version_buf
+        .get(..nul_pos)
+        .map(|slice| String::from_utf8_lossy(slice).into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the calling process's `VRAM` on the device via
+/// `rsmi_compute_process_info_by_device_get`.
+///
+/// Best-effort: `None` when the symbol does not resolve or the call fails.
+/// Caller must already hold an open `RocmSession`.
+#[allow(unsafe_code)]
+fn read_process_used_bytes(lib: &libloading::Library, idx: u32) -> Option<u64> {
+    // SAFETY: symbol lookup for rsmi_compute_process_info_by_device_get. The
+    // name matches the ROCm SMI C API and the signature alias matches the
+    // header. Absence of the symbol is mapped to None via `.ok()?`, so the
+    // caller reports no per-process figure.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+
+    let mut process_info = RsmiProcessInfo::default();
+    // SAFETY: rsmi_compute_process_info_by_device_get writes one
+    // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
+    // matches its layout (see the layout test).
+    let ret = unsafe { get_by_device(std::process::id(), idx, &raw mut process_info) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_compute_process_info_by_device_get returned {ret}");
+        return None;
+    }
+    Some(process_info.vram_usage)
+}
+
 /// Run a single `ROCm` SMI query session for the given device index.
 ///
 /// Loads `ROCm` SMI, runs init, reads the device's `VRAM` total and used, its
 /// name, the driver version, and the calling process's `VRAM` on the device,
-/// then shuts `ROCm` SMI down before returning. Name, driver version and
-/// per-process failures are tolerated (`None`) since the device-wide figures
-/// are still useful. If the library load, init, or the `VRAM` total or used
-/// query fails, the function returns `None`.
+/// then shuts `ROCm` SMI down before returning. Required: the library load,
+/// init, and the `rsmi_dev_memory_total_get` and `rsmi_dev_memory_usage_get`
+/// symbols and calls; if any fails the function returns `None`. Best-effort
+/// (`None` in the result, each reader loading its own symbol): the name
+/// ([`read_device_name`]), the driver version ([`read_driver_version`]) and
+/// the per-process figure ([`read_process_used_bytes`]), since the
+/// device-wide figures are still useful without them.
 #[allow(unsafe_code)]
 pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
     let session = RocmSession::start().ok()?;
@@ -451,20 +568,11 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
     // SAFETY: Loading function symbols from the ROCm SMI library. Each name
     // matches the ROCm SMI C API exactly. The function signatures (type
     // aliases above) match the header definitions.
-    let get_name: libloading::Symbol<'_, RsmiDevNameGetFn> =
-        unsafe { lib.get(b"rsmi_dev_name_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
     let get_total: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
         unsafe { lib.get(b"rsmi_dev_memory_total_get\0") }.ok()?;
     // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
     let get_used: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
         unsafe { lib.get(b"rsmi_dev_memory_usage_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_version: libloading::Symbol<'_, RsmiVersionStrGetFn> =
-        unsafe { lib.get(b"rsmi_version_str_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
 
     let mut device_total: u64 = 0;
     // SAFETY: rsmi_dev_memory_total_get writes one u64 to the caller-provided
@@ -486,80 +594,10 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
         return None;
     }
 
-    // Adapter name (best-effort; failure is non-fatal for the rest of the result).
-    let mut name_buf = [0_u8; ROCM_DEVICE_NAME_BUFFER_SIZE];
-    // SAFETY: rsmi_dev_name_get writes a null-terminated C string into
-    // name_buf, up to `len` bytes, `len` being a size_t. The buffer is
-    // stack-allocated and ROCM_DEVICE_NAME_BUFFER_SIZE long.
-    let ret = unsafe {
-        get_name(
-            idx,
-            name_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
-            ROCM_DEVICE_NAME_BUFFER_SIZE,
-        )
-    };
-    let device_name = if ret == RSMI_STATUS_SUCCESS {
-        let nul_pos = name_buf
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_buf.len());
-        // BORROW: explicit String::from_utf8_lossy + into_owned — name_buf
-        // is stack-local; we need an owned String to return.
-        name_buf
-            .get(..nul_pos)
-            .map(|slice| String::from_utf8_lossy(slice).into_owned())
-            .filter(|s| !s.is_empty())
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_dev_name_get returned {ret}");
-        None
-    };
-
-    // Driver version (best-effort, system-level).
-    let mut version_buf = [0_u8; ROCM_VERSION_BUFFER_SIZE];
-    // CAST: usize → u32, ROCM_VERSION_BUFFER_SIZE = 80 fits in u32
-    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
-    let version_len = ROCM_VERSION_BUFFER_SIZE as u32;
-    // SAFETY: rsmi_version_str_get writes a null-terminated C string into
-    // version_buf, up to `version_len` bytes, a uint32_t. The buffer is
-    // stack-allocated and ROCM_VERSION_BUFFER_SIZE long.
-    let ret = unsafe {
-        get_version(
-            RSMI_SW_COMP_DRIVER,
-            version_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
-            version_len,
-        )
-    };
-    let driver_version = if ret == RSMI_STATUS_SUCCESS {
-        let nul_pos = version_buf
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(version_buf.len());
-        // BORROW: explicit String::from_utf8_lossy + into_owned — version_buf
-        // is stack-local; we need an owned String to return.
-        version_buf
-            .get(..nul_pos)
-            .map(|slice| String::from_utf8_lossy(slice).into_owned())
-            .filter(|s| !s.is_empty())
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_version_str_get returned {ret}");
-        None
-    };
-
-    // The calling process's VRAM on this device (best-effort).
-    let mut process_info = RsmiProcessInfo::default();
-    // SAFETY: rsmi_compute_process_info_by_device_get writes one
-    // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
-    // matches its layout (see the layout test).
-    let ret = unsafe { get_by_device(std::process::id(), idx, &raw mut process_info) };
-    let process_used_bytes = if ret == RSMI_STATUS_SUCCESS {
-        Some(process_info.vram_usage)
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_compute_process_info_by_device_get returned {ret}");
-        None
-    };
+    // Best-effort reads: each loads its own symbol and gives None on failure.
+    let device_name = read_device_name(lib, idx);
+    let driver_version = read_driver_version(lib);
+    let process_used_bytes = read_process_used_bytes(lib, idx);
 
     // Every ROCm SMI call is done: end the session (rsmi_shut_down) here,
     // before the result is assembled.
