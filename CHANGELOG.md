@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `argv[0]` name test no longer fails on Ubuntu 26.04** (`src/gpu/proc_name.rs`) —
+  `read_proc_name_recovers_a_symlinked_process_from_argv0` started `/bin/sleep` through a
+  long-named symlink. On Ubuntu 26.04, which `ubuntu-latest` became in late October 2026,
+  `sleep` is uutils coreutils, a multicall binary that refuses to run under a name it does not
+  know (`Requested utility ... does not match executable name`) and exits at once, leaving an
+  empty `cmdline`; the test then passed only when its poll caught the child before it exited
+  (17 failures in 20 runs on a 26.04 container). The symlink now points at the test binary
+  itself, which runs an ignored helper test that blocks on stdin, and the test fails fast,
+  naming the exit status, if the child exits early. Library code is unchanged.
+
 ## [0.2.15] - 2026-10-27
 
 Answers a field check of v0.2.14 on two multi-GPU Linux nodes, 8× V100 and 2× H100 NVL under
