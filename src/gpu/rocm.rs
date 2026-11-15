@@ -220,37 +220,49 @@ const ROCM_DEVICE_NAME_BUFFER_SIZE: usize = 256;
 const ROCM_VERSION_BUFFER_SIZE: usize = 80;
 
 /// What a failed `rsmi_init` says about the GPUs, read from its return
-/// code by [`classify_init_failure`]. The question is whether GPU processes
-/// could exist that `ROCm` SMI cannot show: if not, the answer is "no
-/// usable `ROCm` SMI"; if so, "can't tell".
+/// code and the host's driver files by [`classify_init_failure`]. The
+/// question is whether GPU processes could exist that `ROCm` SMI cannot
+/// show: if not, the answer is "no usable `ROCm` SMI"; if so, "can't tell".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InitFailure {
-    /// `RSMI_STATUS_INIT_ERROR`: the library found no AMD driver to
-    /// initialize against (a host with the `ROCm` userland installed and no
-    /// `amdgpu` module), so no process can be on its GPUs; read as no usable
-    /// `ROCm` SMI, like a library that does not load.
+    /// `RSMI_STATUS_INIT_ERROR` on a host where neither `/dev/kfd` nor
+    /// `/sys/module/amdgpu` exists ([`amd_driver_present`]): there is no AMD
+    /// driver to initialize against (a host with the `ROCm` userland
+    /// installed and no `amdgpu` module), so no process can be on its GPUs;
+    /// read as no usable `ROCm` SMI, like a library that does not load.
     NoDriver,
-    /// Any other code: GPU processes may exist that `ROCm` SMI cannot show.
-    /// Can't tell.
+    /// Any other code, or `RSMI_STATUS_INIT_ERROR` where an AMD driver is
+    /// present: `rsmi_init` reports every failure of its initialization as
+    /// that code, so with a driver there it means a stack that cannot start,
+    /// and GPU processes may exist that `ROCm` SMI cannot show. Can't tell.
     CannotTell,
 }
 
-/// The [`InitFailure`] an `rsmi_init` return `code` means: one code says no
-/// GPU process can exist, and every other one, unknown codes included, is
-/// "can't tell", the safe answer.
+/// The [`InitFailure`] an `rsmi_init` return `code` means. Only
+/// `RSMI_STATUS_INIT_ERROR` can say no GPU process exists, and only when
+/// `driver_present` (asked for that code alone) finds no AMD driver. Every
+/// other code, unknown codes included, is "can't tell", the safe answer.
 #[must_use]
-const fn classify_init_failure(code: u32) -> InitFailure {
+fn classify_init_failure(code: u32, driver_present: impl FnOnce() -> bool) -> InitFailure {
     match code {
-        RSMI_STATUS_INIT_ERROR => InitFailure::NoDriver,
+        RSMI_STATUS_INIT_ERROR if !driver_present() => InitFailure::NoDriver,
         _ => InitFailure::CannotTell,
     }
+}
+
+/// Whether the host has an AMD driver: `/dev/kfd` or `/sys/module/amdgpu`
+/// exists. Without both, no AMD GPU process can exist on the host.
+#[must_use]
+fn amd_driver_present() -> bool {
+    std::path::Path::new("/dev/kfd").exists() || std::path::Path::new("/sys/module/amdgpu").exists()
 }
 
 /// Why [`RocmSession::start`] gave no session.
 enum StartFailure {
     /// No usable `ROCm` SMI: the library did not load (no `ROCm` userland
-    /// here, or one whose library cannot be loaded), or `rsmi_init` said
-    /// there is no AMD driver ([`InitFailure::NoDriver`]). Either way no GPU
+    /// here, or one whose library cannot be loaded), or `rsmi_init` failed
+    /// on a host with no AMD driver, neither `/dev/kfd` nor
+    /// `/sys/module/amdgpu` ([`InitFailure::NoDriver`]). Either way no GPU
     /// process can be measured, nor exist, through it.
     Absent,
     /// The library loaded but could not start, and GPUs may be there,
@@ -325,7 +337,7 @@ impl RocmSession {
         if ret != RSMI_STATUS_SUCCESS {
             #[cfg(feature = "debug-output")]
             eprintln!("[ROCm debug] rsmi_init returned {ret}");
-            return Err(match classify_init_failure(ret) {
+            return Err(match classify_init_failure(ret, amd_driver_present) {
                 InitFailure::NoDriver => StartFailure::Absent,
                 InitFailure::CannotTell => StartFailure::Broken(call_failure("rsmi_init", ret)),
             });
@@ -354,7 +366,7 @@ impl Drop for RocmSession {
 
 /// Number of AMD GPUs the `ROCm` SMI library reports: [`RocmCount::Counted`],
 /// or why there is none, [`RocmCount::Absent`] when the library does not
-/// load or `rsmi_init` says there is no AMD driver, [`RocmCount::Broken`]
+/// load or `rsmi_init` fails on a host with no AMD driver, [`RocmCount::Broken`]
 /// when it loads but cannot start for any other reason
 /// ([`classify_init_failure`]), or `rsmi_num_monitor_devices` is missing or
 /// fails. Used by the `device_count()` dispatcher and for bounds-checking an
@@ -423,14 +435,131 @@ pub(super) struct RocmQueryResult {
     pub driver_version: Option<String>,
 }
 
+/// Read the adapter name via `rsmi_dev_name_get`.
+///
+/// Best-effort: `None` when the symbol does not resolve, the call fails, or
+/// the name is empty. Caller must already hold an open `RocmSession`.
+#[allow(unsafe_code)]
+fn read_device_name(lib: &libloading::Library, idx: u32) -> Option<String> {
+    // SAFETY: symbol lookup for rsmi_dev_name_get. The name matches the ROCm
+    // SMI C API and the signature alias matches the header. Absence of the
+    // symbol is mapped to None via `.ok()?`, so the caller reports no name.
+    let get_name: libloading::Symbol<'_, RsmiDevNameGetFn> =
+        unsafe { lib.get(b"rsmi_dev_name_get\0") }.ok()?;
+
+    let mut name_buf = [0_u8; ROCM_DEVICE_NAME_BUFFER_SIZE];
+    // SAFETY: rsmi_dev_name_get writes a null-terminated C string into
+    // name_buf, up to `len` bytes, `len` being a size_t. The buffer is
+    // stack-allocated and ROCM_DEVICE_NAME_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_name(
+            idx,
+            name_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            ROCM_DEVICE_NAME_BUFFER_SIZE,
+        )
+    };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_dev_name_get returned {ret}");
+        return None;
+    }
+    let nul_pos = name_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name_buf.len());
+    // BORROW: explicit String::from_utf8_lossy + into_owned — name_buf
+    // is stack-local; we need an owned String to return.
+    name_buf
+        .get(..nul_pos)
+        .map(|slice| String::from_utf8_lossy(slice).into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the driver version via `rsmi_version_str_get` for
+/// `RSMI_SW_COMP_DRIVER`.
+///
+/// System-level (not device-scoped): the same value regardless of device
+/// index. Best-effort: `None` when the symbol does not resolve, the call
+/// fails, or the string is empty. Caller must already hold an open
+/// `RocmSession`.
+#[allow(unsafe_code)]
+fn read_driver_version(lib: &libloading::Library) -> Option<String> {
+    // SAFETY: symbol lookup for rsmi_version_str_get. The name matches the
+    // ROCm SMI C API and the signature alias matches the header. Absence of
+    // the symbol is mapped to None via `.ok()?`, so the caller reports no
+    // driver version.
+    let get_version: libloading::Symbol<'_, RsmiVersionStrGetFn> =
+        unsafe { lib.get(b"rsmi_version_str_get\0") }.ok()?;
+
+    let mut version_buf = [0_u8; ROCM_VERSION_BUFFER_SIZE];
+    // CAST: usize → u32, ROCM_VERSION_BUFFER_SIZE = 80 fits in u32
+    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+    let version_len = ROCM_VERSION_BUFFER_SIZE as u32;
+    // SAFETY: rsmi_version_str_get writes a null-terminated C string into
+    // version_buf, up to `version_len` bytes, a uint32_t. The buffer is
+    // stack-allocated and ROCM_VERSION_BUFFER_SIZE long.
+    let ret = unsafe {
+        get_version(
+            RSMI_SW_COMP_DRIVER,
+            version_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
+            version_len,
+        )
+    };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_version_str_get returned {ret}");
+        return None;
+    }
+    let nul_pos = version_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(version_buf.len());
+    // BORROW: explicit String::from_utf8_lossy + into_owned — version_buf
+    // is stack-local; we need an owned String to return.
+    version_buf
+        .get(..nul_pos)
+        .map(|slice| String::from_utf8_lossy(slice).into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the calling process's `VRAM` on the device via
+/// `rsmi_compute_process_info_by_device_get`.
+///
+/// Best-effort: `None` when the symbol does not resolve or the call fails.
+/// Caller must already hold an open `RocmSession`.
+#[allow(unsafe_code)]
+fn read_process_used_bytes(lib: &libloading::Library, idx: u32) -> Option<u64> {
+    // SAFETY: symbol lookup for rsmi_compute_process_info_by_device_get. The
+    // name matches the ROCm SMI C API and the signature alias matches the
+    // header. Absence of the symbol is mapped to None via `.ok()?`, so the
+    // caller reports no per-process figure.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+
+    let mut process_info = RsmiProcessInfo::default();
+    // SAFETY: rsmi_compute_process_info_by_device_get writes one
+    // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
+    // matches its layout (see the layout test).
+    let ret = unsafe { get_by_device(std::process::id(), idx, &raw mut process_info) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_compute_process_info_by_device_get returned {ret}");
+        return None;
+    }
+    Some(process_info.vram_usage)
+}
+
 /// Run a single `ROCm` SMI query session for the given device index.
 ///
 /// Loads `ROCm` SMI, runs init, reads the device's `VRAM` total and used, its
 /// name, the driver version, and the calling process's `VRAM` on the device,
-/// then shuts `ROCm` SMI down before returning. Name, driver version and
-/// per-process failures are tolerated (`None`) since the device-wide figures
-/// are still useful. If the library load, init, or the `VRAM` total or used
-/// query fails, the function returns `None`.
+/// then shuts `ROCm` SMI down before returning. Required: the library load,
+/// init, and the `rsmi_dev_memory_total_get` and `rsmi_dev_memory_usage_get`
+/// symbols and calls; if any fails the function returns `None`. Best-effort
+/// (`None` in the result, each reader loading its own symbol): the name
+/// ([`read_device_name`]), the driver version ([`read_driver_version`]) and
+/// the per-process figure ([`read_process_used_bytes`]), since the
+/// device-wide figures are still useful without them.
 #[allow(unsafe_code)]
 pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
     let session = RocmSession::start().ok()?;
@@ -439,20 +568,11 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
     // SAFETY: Loading function symbols from the ROCm SMI library. Each name
     // matches the ROCm SMI C API exactly. The function signatures (type
     // aliases above) match the header definitions.
-    let get_name: libloading::Symbol<'_, RsmiDevNameGetFn> =
-        unsafe { lib.get(b"rsmi_dev_name_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
     let get_total: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
         unsafe { lib.get(b"rsmi_dev_memory_total_get\0") }.ok()?;
     // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
     let get_used: libloading::Symbol<'_, RsmiDevMemoryGetFn> =
         unsafe { lib.get(b"rsmi_dev_memory_usage_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_version: libloading::Symbol<'_, RsmiVersionStrGetFn> =
-        unsafe { lib.get(b"rsmi_version_str_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
 
     let mut device_total: u64 = 0;
     // SAFETY: rsmi_dev_memory_total_get writes one u64 to the caller-provided
@@ -474,80 +594,10 @@ pub(super) fn query(idx: u32) -> Option<RocmQueryResult> {
         return None;
     }
 
-    // Adapter name (best-effort; failure is non-fatal for the rest of the result).
-    let mut name_buf = [0_u8; ROCM_DEVICE_NAME_BUFFER_SIZE];
-    // SAFETY: rsmi_dev_name_get writes a null-terminated C string into
-    // name_buf, up to `len` bytes, `len` being a size_t. The buffer is
-    // stack-allocated and ROCM_DEVICE_NAME_BUFFER_SIZE long.
-    let ret = unsafe {
-        get_name(
-            idx,
-            name_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
-            ROCM_DEVICE_NAME_BUFFER_SIZE,
-        )
-    };
-    let device_name = if ret == RSMI_STATUS_SUCCESS {
-        let nul_pos = name_buf
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_buf.len());
-        // BORROW: explicit String::from_utf8_lossy + into_owned — name_buf
-        // is stack-local; we need an owned String to return.
-        name_buf
-            .get(..nul_pos)
-            .map(|slice| String::from_utf8_lossy(slice).into_owned())
-            .filter(|s| !s.is_empty())
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_dev_name_get returned {ret}");
-        None
-    };
-
-    // Driver version (best-effort, system-level).
-    let mut version_buf = [0_u8; ROCM_VERSION_BUFFER_SIZE];
-    // CAST: usize → u32, ROCM_VERSION_BUFFER_SIZE = 80 fits in u32
-    #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
-    let version_len = ROCM_VERSION_BUFFER_SIZE as u32;
-    // SAFETY: rsmi_version_str_get writes a null-terminated C string into
-    // version_buf, up to `version_len` bytes, a uint32_t. The buffer is
-    // stack-allocated and ROCM_VERSION_BUFFER_SIZE long.
-    let ret = unsafe {
-        get_version(
-            RSMI_SW_COMP_DRIVER,
-            version_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
-            version_len,
-        )
-    };
-    let driver_version = if ret == RSMI_STATUS_SUCCESS {
-        let nul_pos = version_buf
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(version_buf.len());
-        // BORROW: explicit String::from_utf8_lossy + into_owned — version_buf
-        // is stack-local; we need an owned String to return.
-        version_buf
-            .get(..nul_pos)
-            .map(|slice| String::from_utf8_lossy(slice).into_owned())
-            .filter(|s| !s.is_empty())
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_version_str_get returned {ret}");
-        None
-    };
-
-    // The calling process's VRAM on this device (best-effort).
-    let mut process_info = RsmiProcessInfo::default();
-    // SAFETY: rsmi_compute_process_info_by_device_get writes one
-    // rsmi_process_info_t to the caller-provided pointer; RsmiProcessInfo
-    // matches its layout (see the layout test).
-    let ret = unsafe { get_by_device(std::process::id(), idx, &raw mut process_info) };
-    let process_used_bytes = if ret == RSMI_STATUS_SUCCESS {
-        Some(process_info.vram_usage)
-    } else {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_compute_process_info_by_device_get returned {ret}");
-        None
-    };
+    // Best-effort reads: each loads its own symbol and gives None on failure.
+    let device_name = read_device_name(lib, idx);
+    let driver_version = read_driver_version(lib);
+    let process_used_bytes = read_process_used_bytes(lib, idx);
 
     // Every ROCm SMI call is done: end the session (rsmi_shut_down) here,
     // before the result is assembled.
@@ -610,62 +660,18 @@ fn rows_on_device(
     Some(rows)
 }
 
-/// Enumerate every compute process on the given device, returning
-/// `(pid, used_bytes)` for each process that uses it.
-///
-/// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
-/// whatever its owner or device, with `vram_usage` zero. For each PID,
-/// `rsmi_compute_process_gpus_get` says which devices it uses, and
-/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
-/// ([`rows_on_device`]).
-///
-/// Both list calls follow the library's two-call size protocol: a null buffer
-/// returns the count, then a buffer of that many entries is filled.
-///
-/// A process can exit after the host listing. `RSMI_STATUS_NOT_FOUND` from
-/// either per-PID call means it is gone, and it has no row, as in `NVML`'s
-/// per-device listing.
-///
-/// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
-/// not resolve, any other call fails (the device count's included), or `idx`
-/// is not below the device count; never an empty `Vec` for a failed call.
+/// One whole listing for [`list_compute_processes`]: the host's processes
+/// (size call, then fill call), the devices each uses, and each one's bytes
+/// on `idx` ([`rows_on_device`]), through the entry points the caller
+/// resolved. `None` when any call fails or a reported count is implausible.
+/// The entry points stay valid only while the caller's session lives.
 #[allow(unsafe_code)]
-#[must_use]
-pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
-    let session = RocmSession::start().ok()?;
-    let lib = session.lib();
-
-    // SAFETY: symbol names match the ROCm SMI C API.
-    let get_processes: libloading::Symbol<'_, RsmiComputeProcessInfoGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_gpus: libloading::Symbol<'_, RsmiComputeProcessGpusGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_gpus_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_count: libloading::Symbol<'_, RsmiNumMonitorDevicesFn> =
-        unsafe { lib.get(b"rsmi_num_monitor_devices\0") }.ok()?;
-
-    // The process list is host-wide, so an index past the devices would read
-    // as an empty device: it is `None`, as NVML's listing is when its handle
-    // lookup fails.
-    let mut devices_present: u32 = 0;
-    // SAFETY: rsmi_num_monitor_devices writes one u32 to the caller-provided
-    // pointer.
-    let ret = unsafe { get_count(&raw mut devices_present) };
-    if ret != RSMI_STATUS_SUCCESS {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_num_monitor_devices returned {ret}");
-        return None;
-    }
-    if idx >= devices_present {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] device {idx} is not below the {devices_present} devices");
-        return None;
-    }
-
+fn list_once(
+    idx: u32,
+    get_processes: RsmiComputeProcessInfoGetFn,
+    get_gpus: RsmiComputeProcessGpusGetFn,
+    get_by_device: RsmiComputeProcessInfoByDeviceGetFn,
+) -> Option<Vec<(u32, u64)>> {
     // ---- Every PID on the host: size call, then the fill call -------------
     let mut count: u32 = 0;
     // SAFETY: with a null buffer, rsmi_compute_process_info_get writes only
@@ -789,15 +795,92 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
         }
     });
 
-    // End the session (rsmi_shut_down) only now that every call is done.
-    drop(session);
-
     #[cfg(feature = "debug-output")]
     eprintln!(
         "[ROCm debug] list_compute_processes(idx={idx}): {} PID(s) on the host, {} on the device",
         procs.len(),
         rows.as_ref().map_or(0, Vec::len)
     );
+
+    rows
+}
+
+/// Enumerate every compute process on the given device, returning
+/// `(pid, used_bytes)` for each process that uses it.
+///
+/// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
+/// whatever its owner or device, with `vram_usage` zero. For each PID,
+/// `rsmi_compute_process_gpus_get` names the devices it has queues on, so a
+/// device's rows are the processes with a queue on it, and
+/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
+/// ([`rows_on_device`]).
+///
+/// Both list calls follow the library's two-call size protocol: a null buffer
+/// returns the count, then a buffer of that many entries is filled.
+///
+/// A process can exit after the host listing. `RSMI_STATUS_NOT_FOUND` from
+/// either per-PID call means it is gone, and it has no row, as in `NVML`'s
+/// per-device listing. A process can also start or exit during the listing
+/// itself: `RSMI_STATUS_INSUFFICIENT_SIZE` from a list call (a process
+/// started between its size and fill calls) or `RSMI_STATUS_NOT_SUPPORTED`
+/// from a per-PID read (a process exited while the library read it) fails
+/// the listing. Like `nvml.rs`, this retries once, here the whole listing
+/// ([`list_once`]), because `ROCm` SMI reports neither the new count nor a
+/// process start or exit as such.
+///
+/// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
+/// not resolve, any other call fails (the device count's included), a
+/// failed listing fails again on its retry, or `idx` is not below the device
+/// count; never an empty `Vec` for a failed call.
+#[allow(unsafe_code)]
+#[must_use]
+pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
+    let session = RocmSession::start().ok()?;
+    let lib = session.lib();
+
+    // SAFETY: symbol names match the ROCm SMI C API.
+    let get_processes: libloading::Symbol<'_, RsmiComputeProcessInfoGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_gpus: libloading::Symbol<'_, RsmiComputeProcessGpusGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_gpus_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_count: libloading::Symbol<'_, RsmiNumMonitorDevicesFn> =
+        unsafe { lib.get(b"rsmi_num_monitor_devices\0") }.ok()?;
+
+    // The process list is host-wide, so an index past the devices would read
+    // as an empty device: it is `None`, as NVML's listing is when its handle
+    // lookup fails.
+    let mut devices_present: u32 = 0;
+    // SAFETY: rsmi_num_monitor_devices writes one u32 to the caller-provided
+    // pointer.
+    let ret = unsafe { get_count(&raw mut devices_present) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_num_monitor_devices returned {ret}");
+        return None;
+    }
+    if idx >= devices_present {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] device {idx} is not below the {devices_present} devices");
+        return None;
+    }
+
+    // A process that starts or exits during a listing fails one of its calls
+    // with a code that a fresh listing does not return, and ROCm SMI reports
+    // neither the new count nor the start or exit as such: one retry of the
+    // whole listing, as nvml.rs retries once.
+    let rows = list_once(idx, *get_processes, *get_gpus, *get_by_device).or_else(|| {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] list_compute_processes(idx={idx}): retrying the listing once");
+        list_once(idx, *get_processes, *get_gpus, *get_by_device)
+    });
+
+    // End the session (rsmi_shut_down) only now that every call is done.
+    drop(session);
 
     rows
 }
@@ -922,15 +1005,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_init_failure_maps_the_measured_codes() {
-        // No AMD driver (measured on a host with the userland installed):
-        // no GPU process can exist.
+    fn classify_init_failure_reads_init_error_by_the_driver() {
+        // INIT_ERROR with no AMD driver (measured on a host with the
+        // userland installed): no GPU process can exist.
         assert_eq!(
-            classify_init_failure(RSMI_STATUS_INIT_ERROR),
+            classify_init_failure(RSMI_STATUS_INIT_ERROR, || false),
             InitFailure::NoDriver
         );
-        // Every other code, unknown and future ones included: GPU processes
-        // may exist that ROCm SMI cannot show.
+        // INIT_ERROR where a driver is present: the stack is broken, and GPU
+        // processes may exist that ROCm SMI cannot show.
+        assert_eq!(
+            classify_init_failure(RSMI_STATUS_INIT_ERROR, || true),
+            InitFailure::CannotTell
+        );
+        // Every other code, unknown and future ones included, is "can't
+        // tell", and the driver is not asked.
         for code in [
             RSMI_STATUS_INVALID_ARGS,
             RSMI_STATUS_PERMISSION,
@@ -939,7 +1028,7 @@ mod tests {
             23,
         ] {
             assert_eq!(
-                classify_init_failure(code),
+                classify_init_failure(code, || unreachable!("asked for code {code}")),
                 InitFailure::CannotTell,
                 "code {code}"
             );

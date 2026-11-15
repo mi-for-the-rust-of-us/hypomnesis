@@ -136,7 +136,7 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
 
     // ROCm SMI is asked only when NVML's count is not positive.
     #[cfg(all(target_os = "linux", feature = "rocm"))]
-    let nvml_count = if matches!(nvml_count, Ok(count) if count > 0) {
+    let backends_count = if matches!(nvml_count, Ok(count) if count > 0) {
         nvml_count
     } else {
         let rocm_count = match rocm::device_count() {
@@ -147,14 +147,17 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
         count_verdict(nvml_count, rocm_count)
     };
 
-    let nvml_failure = match nvml_count {
+    #[cfg(not(all(target_os = "linux", feature = "rocm")))]
+    let backends_count = nvml_count;
+
+    let backends_failure = match backends_count {
         Ok(count) => return Ok(count),
         Err(failure) => failure,
     };
 
     #[cfg(all(windows, feature = "dxgi"))]
     if let Some(count) = dxgi::device_count()
-        && dxgi_count_stands(count, nvml_failure.is_some())
+        && dxgi_count_stands(count, backends_failure.is_some())
     {
         return Ok(count);
     }
@@ -163,7 +166,7 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     // counting via `nvidia-smi -L` is more brittle than NVML/DXGI and
     // adds a subprocess invocation for what's typically a metadata call.
 
-    Err(nvml_failure)
+    Err(backends_failure)
 }
 
 /// The device count of the Linux backends, `NVML` and `ROCm` SMI, each given
@@ -508,9 +511,10 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///    processes (active `CUDA` context).
 /// 3. `ROCm` SMI (Linux), after `NVML`. `rsmi_compute_process_info_get`
 ///    lists every `KFD` process on the host, `rsmi_compute_process_gpus_get`
-///    says which devices each uses, and
-///    `rsmi_compute_process_info_by_device_get` gives its bytes on the
-///    requested one; names come from `/proc/<pid>/comm` as for `NVML`.
+///    names the devices each has queues on, so a device's rows are the
+///    processes with a queue on it, and
+///    `rsmi_compute_process_info_by_device_get` gives their bytes there;
+///    names come from `/proc/<pid>/comm` as for `NVML`.
 ///    Compute-only, like `NVML`.
 /// 4. `PDH` (Windows primary, consumer `WDDM`). Reads
 ///    `\GPU Process Memory(<instance>)\Dedicated Usage` (→

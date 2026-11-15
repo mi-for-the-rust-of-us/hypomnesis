@@ -7,8 +7,10 @@
  * ROCm SMI.
  *
  *   FAKE_RSMI_INIT=<code>     rsmi_init's return code (default 0); 8 is
- *                             RSMI_STATUS_INIT_ERROR, no AMD driver, and 6
- *                             is RSMI_STATUS_INTERNAL_EXCEPTION.
+ *                             RSMI_STATUS_INIT_ERROR, which hmn reads as no
+ *                             GPU only where neither /dev/kfd nor
+ *                             /sys/module/amdgpu exists, and 6 is
+ *                             RSMI_STATUS_INTERNAL_EXCEPTION.
  *   FAKE_RSMI_COUNT=<code>    rsmi_num_monitor_devices' return code
  *                             (default 0).
  *   FAKE_RSMI_DEVICES=<n>,... the devices in index order, each a model name;

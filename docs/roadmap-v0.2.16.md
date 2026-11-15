@@ -97,20 +97,24 @@ Reading the library on the same node settled the questions the report left open:
   function with its own unit tests. A broken ROCm reads as
   `Rocm(..)`, not `Nvml(..)`: the error carried out of the count is the backend's own.
 - **Absent, no GPU and broken follow the `NVML` classifier.** A library that does not load is
-  absence. `RSMI_STATUS_SUCCESS` counts. `RSMI_STATUS_INIT_ERROR` (8) means no GPU here, the
-  `NoDriver` arm of `InitFailure`, so a CPU-only host with the ROCm userland installed still prints
-  `no visible GPUs.` and exits `0`. Every other code, unknown ones included, is `CannotTell`, which
-  is `HypomnesisError::Rocm` naming the call and the code from `rocm_smi.h`. The library describes
-  `INIT_ERROR` as a failure in initialization, monitor discovery or set-up, so a broken stack on a
-  host that has AMD GPUs can return it too and read as no GPU; no such host was observed. The
-  mapping follows the line v0.2.15 drew: a CPU-only host must not exit `2`.
+  absence. `RSMI_STATUS_SUCCESS` counts. `rsmi_init` turns every failure of its initialization
+  into `RSMI_STATUS_INIT_ERROR` (8), so the code alone cannot tell no driver from a broken stack.
+  On code 8, `classify_init_failure` asks whether an AMD driver is present: `/dev/kfd` or
+  `/sys/module/amdgpu` exists. Neither is the `NoDriver` arm of `InitFailure`, so a CPU-only host
+  with the ROCm userland installed still prints `no visible GPUs.` and exits `0`. Either is
+  `CannotTell`, so a host with AMD GPUs whose stack fails to initialize exits `2`. Every other
+  code, unknown ones included, is `CannotTell`, which is `HypomnesisError::Rocm` naming the call
+  and the code from `rocm_smi.h`. The mapping follows the line v0.2.15 drew: a CPU-only host must
+  not exit `2`.
 - **The index is the library's enumeration index over the devices the process can see, `0..n`.**
   Scheduler numbers are never read, as for `NVML`: scoping a job to its devices comes from the OS.
 - **Processes are listed per device, like `NVML`.** The list call is host-wide and carries no bytes;
-  membership and bytes are per device. A device's rows are the PIDs whose
-  `rsmi_compute_process_gpus_get` includes it, each with its
-  `rsmi_compute_process_info_by_device_get` figure, whoever owns the process. A device outside the
-  process's view contributes no row.
+  membership and bytes are per device. A device's rows are the processes with a queue on it, the
+  rule AMD SMI's per-device list follows: the PIDs whose `rsmi_compute_process_gpus_get` includes
+  it, each with its `rsmi_compute_process_info_by_device_get` figure there, whoever owns the
+  process. A device outside the process's view contributes no row. A listing that fails because a
+  process started or exited during it is retried once, whole: like `nvml.rs`, one retry, because
+  ROCm SMI reports neither the new count nor a process start or exit as such.
 - **No reserved bytes, no spill measurement.** `reserved_bytes` is `None`; the driver version is
   `RSMI_SW_COMP_DRIVER` through `rsmi_version_str_get`; the process name comes from `/proc`, the path
   `NVML` rows take. Spill is not measurable on Linux for either vendor, so `hmn watch` and
@@ -172,10 +176,10 @@ cgroups) ticks, or, for a library-level row, the measurement that was taken ther
 | The library's per-process bytes are the tool's | `rsmi_compute_process_info_by_device_get` equals `rocm-smi --showpids` to the byte for one device; for two devices the per-device figures sum to its figure (measured: 2298515456 B; 1224773632 B and 2298515456 B) |
 | The bytes track the device | within 1 MiB of the device's used-VRAM delta (measured: -77824, -94208 and -98304 B) |
 | The ABI is the header's | `rsmi_process_info_t` is 32 bytes at the offsets above, and `rsmi_status_t`, `rsmi_memory_type_t` and `rsmi_sw_component_t` are 4; 200 init, shutdown and `dlclose` cycles ran with no non-zero return (measured, in C) |
-| A host with the ROCm userland and no AMD driver is not broken | `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8) there (measured); `hmn` prints `no visible GPUs.` and exits `0` |
+| A host with the ROCm userland and no AMD driver is not broken | `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8) there, with neither `/dev/kfd` nor the `amdgpu` module (measured); `hmn` prints `no visible GPUs.` and exits `0` |
 | A job granted no GPU on an AMD node | `hmn` prints `no visible GPUs.` and exits `0` |
 | `hmn`, `hmn --json` | names the GPU, total, used and free, and the driver version; shows no reserved parenthetical; exit `0` |
-| `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with VRAM on each device, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
+| `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with a queue on each device, with its VRAM there, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
 | `hmn watch` (PID, `--follow-new`, `--filter`, `--min`) | the same rows sampled over time; the spill line reads "not measurable" |
 | `hmn spill -- <cmd>` | runs the command and prints the "not measurable on this platform" note |
 | `hmn fits <size>` | exits `0`, `1` or `2` on the device's free VRAM |
@@ -241,8 +245,9 @@ Decided on 2026-11-09, before the first commit:
 Taken from the measurements:
 
 - **The library, not `sysfs` or `amd-smi`**, for the reasons under *Design decisions*.
-- **`RSMI_STATUS_INIT_ERROR` reads as no GPU**; the alternative, reading it as broken, would exit
-  `2` on every CPU-only host with the ROCm userland and is the maintainer's call.
+- **`RSMI_STATUS_INIT_ERROR` reads as no GPU only where neither `/dev/kfd` nor the `amdgpu` module
+  exists**; where either exists it reads as broken. Reading it as broken everywhere would exit `2`
+  on every CPU-only host with the ROCm userland and is the maintainer's call.
 - **The version number is the maintainer's to confirm.** This roadmap and `ROADMAP.md` carry
   v0.2.16 until the maintainer says otherwise.
 
