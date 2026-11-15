@@ -220,37 +220,49 @@ const ROCM_DEVICE_NAME_BUFFER_SIZE: usize = 256;
 const ROCM_VERSION_BUFFER_SIZE: usize = 80;
 
 /// What a failed `rsmi_init` says about the GPUs, read from its return
-/// code by [`classify_init_failure`]. The question is whether GPU processes
-/// could exist that `ROCm` SMI cannot show: if not, the answer is "no
-/// usable `ROCm` SMI"; if so, "can't tell".
+/// code and the host's driver files by [`classify_init_failure`]. The
+/// question is whether GPU processes could exist that `ROCm` SMI cannot
+/// show: if not, the answer is "no usable `ROCm` SMI"; if so, "can't tell".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InitFailure {
-    /// `RSMI_STATUS_INIT_ERROR`: the library found no AMD driver to
-    /// initialize against (a host with the `ROCm` userland installed and no
-    /// `amdgpu` module), so no process can be on its GPUs; read as no usable
-    /// `ROCm` SMI, like a library that does not load.
+    /// `RSMI_STATUS_INIT_ERROR` on a host where neither `/dev/kfd` nor
+    /// `/sys/module/amdgpu` exists ([`amd_driver_present`]): there is no AMD
+    /// driver to initialize against (a host with the `ROCm` userland
+    /// installed and no `amdgpu` module), so no process can be on its GPUs;
+    /// read as no usable `ROCm` SMI, like a library that does not load.
     NoDriver,
-    /// Any other code: GPU processes may exist that `ROCm` SMI cannot show.
-    /// Can't tell.
+    /// Any other code, or `RSMI_STATUS_INIT_ERROR` where an AMD driver is
+    /// present: `rsmi_init` reports every failure of its initialization as
+    /// that code, so with a driver there it means a stack that cannot start,
+    /// and GPU processes may exist that `ROCm` SMI cannot show. Can't tell.
     CannotTell,
 }
 
-/// The [`InitFailure`] an `rsmi_init` return `code` means: one code says no
-/// GPU process can exist, and every other one, unknown codes included, is
-/// "can't tell", the safe answer.
+/// The [`InitFailure`] an `rsmi_init` return `code` means. Only
+/// `RSMI_STATUS_INIT_ERROR` can say no GPU process exists, and only when
+/// `driver_present` (asked for that code alone) finds no AMD driver. Every
+/// other code, unknown codes included, is "can't tell", the safe answer.
 #[must_use]
-const fn classify_init_failure(code: u32) -> InitFailure {
+fn classify_init_failure(code: u32, driver_present: impl FnOnce() -> bool) -> InitFailure {
     match code {
-        RSMI_STATUS_INIT_ERROR => InitFailure::NoDriver,
+        RSMI_STATUS_INIT_ERROR if !driver_present() => InitFailure::NoDriver,
         _ => InitFailure::CannotTell,
     }
+}
+
+/// Whether the host has an AMD driver: `/dev/kfd` or `/sys/module/amdgpu`
+/// exists. Without both, no AMD GPU process can exist on the host.
+#[must_use]
+fn amd_driver_present() -> bool {
+    std::path::Path::new("/dev/kfd").exists() || std::path::Path::new("/sys/module/amdgpu").exists()
 }
 
 /// Why [`RocmSession::start`] gave no session.
 enum StartFailure {
     /// No usable `ROCm` SMI: the library did not load (no `ROCm` userland
-    /// here, or one whose library cannot be loaded), or `rsmi_init` said
-    /// there is no AMD driver ([`InitFailure::NoDriver`]). Either way no GPU
+    /// here, or one whose library cannot be loaded), or `rsmi_init` failed
+    /// on a host with no AMD driver, neither `/dev/kfd` nor
+    /// `/sys/module/amdgpu` ([`InitFailure::NoDriver`]). Either way no GPU
     /// process can be measured, nor exist, through it.
     Absent,
     /// The library loaded but could not start, and GPUs may be there,
@@ -325,7 +337,7 @@ impl RocmSession {
         if ret != RSMI_STATUS_SUCCESS {
             #[cfg(feature = "debug-output")]
             eprintln!("[ROCm debug] rsmi_init returned {ret}");
-            return Err(match classify_init_failure(ret) {
+            return Err(match classify_init_failure(ret, amd_driver_present) {
                 InitFailure::NoDriver => StartFailure::Absent,
                 InitFailure::CannotTell => StartFailure::Broken(call_failure("rsmi_init", ret)),
             });
@@ -354,7 +366,7 @@ impl Drop for RocmSession {
 
 /// Number of AMD GPUs the `ROCm` SMI library reports: [`RocmCount::Counted`],
 /// or why there is none, [`RocmCount::Absent`] when the library does not
-/// load or `rsmi_init` says there is no AMD driver, [`RocmCount::Broken`]
+/// load or `rsmi_init` fails on a host with no AMD driver, [`RocmCount::Broken`]
 /// when it loads but cannot start for any other reason
 /// ([`classify_init_failure`]), or `rsmi_num_monitor_devices` is missing or
 /// fails. Used by the `device_count()` dispatcher and for bounds-checking an
@@ -922,15 +934,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_init_failure_maps_the_measured_codes() {
-        // No AMD driver (measured on a host with the userland installed):
-        // no GPU process can exist.
+    fn classify_init_failure_reads_init_error_by_the_driver() {
+        // INIT_ERROR with no AMD driver (measured on a host with the
+        // userland installed): no GPU process can exist.
         assert_eq!(
-            classify_init_failure(RSMI_STATUS_INIT_ERROR),
+            classify_init_failure(RSMI_STATUS_INIT_ERROR, || false),
             InitFailure::NoDriver
         );
-        // Every other code, unknown and future ones included: GPU processes
-        // may exist that ROCm SMI cannot show.
+        // INIT_ERROR where a driver is present: the stack is broken, and GPU
+        // processes may exist that ROCm SMI cannot show.
+        assert_eq!(
+            classify_init_failure(RSMI_STATUS_INIT_ERROR, || true),
+            InitFailure::CannotTell
+        );
+        // Every other code, unknown and future ones included, is "can't
+        // tell", and the driver is not asked.
         for code in [
             RSMI_STATUS_INVALID_ARGS,
             RSMI_STATUS_PERMISSION,
@@ -939,7 +957,7 @@ mod tests {
             23,
         ] {
             assert_eq!(
-                classify_init_failure(code),
+                classify_init_failure(code, || unreachable!("asked for code {code}")),
                 InitFailure::CannotTell,
                 "code {code}"
             );
