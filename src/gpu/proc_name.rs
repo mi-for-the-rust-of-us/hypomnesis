@@ -173,22 +173,58 @@ mod tests {
         assert_eq!(read_proc_name(std::process::id()).unwrap(), expected);
     }
 
+    /// Set in the environment of the child that
+    /// [`read_proc_name_recovers_a_symlinked_process_from_argv0`] starts.
+    const ARGV0_PROBE_ENV: &str = "HYPOMNESIS_ARGV0_PROBE";
+
+    /// Not a test: the process the symlink test starts, by re-running
+    /// this test binary through a symlink. It blocks until its stdin
+    /// closes, so the parent can read its `/proc` entries meanwhile.
+    #[test]
+    #[ignore = "child process of read_proc_name_recovers_a_symlinked_process_from_argv0"]
+    fn argv0_probe_child() {
+        if std::env::var_os(ARGV0_PROBE_ENV).is_some() {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        }
+    }
+
     #[test]
     fn read_proc_name_recovers_a_symlinked_process_from_argv0() {
-        // `exe` resolves the symlink to `sleep`; only `argv[0]` still
-        // carries the long name the process was started by.
+        // `exe` resolves the symlink to this test binary
+        // (`hypomnesis-<hash>`); only `argv[0]` still carries the long
+        // name the process was started by.
+        //
+        // The symlink targets this binary, not a system tool: a multicall
+        // build such as uutils coreutils (`/usr/bin/sleep` on Ubuntu
+        // 26.04) refuses to run under a name it does not know and exits
+        // at once, leaving an empty `cmdline` to read.
         let dir = std::env::temp_dir().join(format!("hypomnesis-proc-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let link = dir.join("hypomnesis_long_probe_name");
         let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
-        let mut child = std::process::Command::new(&link).arg("30").spawn().unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+        // libtest names tests by their path inside the crate.
+        let (_crate, module) = module_path!().split_once("::").unwrap();
+        let mut child = std::process::Command::new(&link)
+            .args(["--exact", &format!("{module}::argv0_probe_child")])
+            .args(["--ignored", "--nocapture"])
+            .env(ARGV0_PROBE_ENV, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         // The child's `comm` is set by `execve`; poll until it is, rather
         // than racing the fork.
         let mut name = None;
-        for _ in 0..100 {
+        let mut exited = None;
+        for _ in 0..500 {
             name = read_proc_name(child.id());
             if name.as_deref() == Some("hypomnesis_long_probe_name") {
+                break;
+            }
+            exited = child.try_wait().unwrap();
+            if exited.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -196,6 +232,7 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(exited.is_none(), "probe child exited early: {exited:?}");
         assert_eq!(name.as_deref(), Some("hypomnesis_long_probe_name"));
     }
 }
