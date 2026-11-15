@@ -622,62 +622,18 @@ fn rows_on_device(
     Some(rows)
 }
 
-/// Enumerate every compute process on the given device, returning
-/// `(pid, used_bytes)` for each process that uses it.
-///
-/// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
-/// whatever its owner or device, with `vram_usage` zero. For each PID,
-/// `rsmi_compute_process_gpus_get` says which devices it uses, and
-/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
-/// ([`rows_on_device`]).
-///
-/// Both list calls follow the library's two-call size protocol: a null buffer
-/// returns the count, then a buffer of that many entries is filled.
-///
-/// A process can exit after the host listing. `RSMI_STATUS_NOT_FOUND` from
-/// either per-PID call means it is gone, and it has no row, as in `NVML`'s
-/// per-device listing.
-///
-/// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
-/// not resolve, any other call fails (the device count's included), or `idx`
-/// is not below the device count; never an empty `Vec` for a failed call.
+/// One whole listing for [`list_compute_processes`]: the host's processes
+/// (size call, then fill call), the devices each uses, and each one's bytes
+/// on `idx` ([`rows_on_device`]), through the entry points the caller
+/// resolved. `None` when any call fails or a reported count is implausible.
+/// The entry points stay valid only while the caller's session lives.
 #[allow(unsafe_code)]
-#[must_use]
-pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
-    let session = RocmSession::start().ok()?;
-    let lib = session.lib();
-
-    // SAFETY: symbol names match the ROCm SMI C API.
-    let get_processes: libloading::Symbol<'_, RsmiComputeProcessInfoGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_gpus: libloading::Symbol<'_, RsmiComputeProcessGpusGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_gpus_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
-        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
-    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
-    let get_count: libloading::Symbol<'_, RsmiNumMonitorDevicesFn> =
-        unsafe { lib.get(b"rsmi_num_monitor_devices\0") }.ok()?;
-
-    // The process list is host-wide, so an index past the devices would read
-    // as an empty device: it is `None`, as NVML's listing is when its handle
-    // lookup fails.
-    let mut devices_present: u32 = 0;
-    // SAFETY: rsmi_num_monitor_devices writes one u32 to the caller-provided
-    // pointer.
-    let ret = unsafe { get_count(&raw mut devices_present) };
-    if ret != RSMI_STATUS_SUCCESS {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] rsmi_num_monitor_devices returned {ret}");
-        return None;
-    }
-    if idx >= devices_present {
-        #[cfg(feature = "debug-output")]
-        eprintln!("[ROCm debug] device {idx} is not below the {devices_present} devices");
-        return None;
-    }
-
+fn list_once(
+    idx: u32,
+    get_processes: RsmiComputeProcessInfoGetFn,
+    get_gpus: RsmiComputeProcessGpusGetFn,
+    get_by_device: RsmiComputeProcessInfoByDeviceGetFn,
+) -> Option<Vec<(u32, u64)>> {
     // ---- Every PID on the host: size call, then the fill call -------------
     let mut count: u32 = 0;
     // SAFETY: with a null buffer, rsmi_compute_process_info_get writes only
@@ -801,15 +757,89 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
         }
     });
 
-    // End the session (rsmi_shut_down) only now that every call is done.
-    drop(session);
-
     #[cfg(feature = "debug-output")]
     eprintln!(
         "[ROCm debug] list_compute_processes(idx={idx}): {} PID(s) on the host, {} on the device",
         procs.len(),
         rows.as_ref().map_or(0, Vec::len)
     );
+
+    rows
+}
+
+/// Enumerate every compute process on the given device, returning
+/// `(pid, used_bytes)` for each process that uses it.
+///
+/// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
+/// whatever its owner or device, with `vram_usage` zero. For each PID,
+/// `rsmi_compute_process_gpus_get` says which devices it uses, and
+/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
+/// ([`rows_on_device`]).
+///
+/// Both list calls follow the library's two-call size protocol: a null buffer
+/// returns the count, then a buffer of that many entries is filled.
+///
+/// A process can exit after the host listing. `RSMI_STATUS_NOT_FOUND` from
+/// either per-PID call means it is gone, and it has no row, as in `NVML`'s
+/// per-device listing. A process can also start or exit during the listing
+/// itself: `RSMI_STATUS_INSUFFICIENT_SIZE` from a list call (a process
+/// started between its size and fill calls) or `RSMI_STATUS_NOT_SUPPORTED`
+/// from a per-PID read (a process exited while the library read it) fails
+/// the listing, and the whole listing is retried once ([`list_once`]), as
+/// `NVML`'s is.
+///
+/// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
+/// not resolve, any other call fails (the device count's included), a
+/// failed listing fails again on its retry, or `idx` is not below the device
+/// count; never an empty `Vec` for a failed call.
+#[allow(unsafe_code)]
+#[must_use]
+pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
+    let session = RocmSession::start().ok()?;
+    let lib = session.lib();
+
+    // SAFETY: symbol names match the ROCm SMI C API.
+    let get_processes: libloading::Symbol<'_, RsmiComputeProcessInfoGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_gpus: libloading::Symbol<'_, RsmiComputeProcessGpusGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_gpus_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_by_device: libloading::Symbol<'_, RsmiComputeProcessInfoByDeviceGetFn> =
+        unsafe { lib.get(b"rsmi_compute_process_info_by_device_get\0") }.ok()?;
+    // SAFETY: as above, a ROCm SMI symbol; the alias matches the header.
+    let get_count: libloading::Symbol<'_, RsmiNumMonitorDevicesFn> =
+        unsafe { lib.get(b"rsmi_num_monitor_devices\0") }.ok()?;
+
+    // The process list is host-wide, so an index past the devices would read
+    // as an empty device: it is `None`, as NVML's listing is when its handle
+    // lookup fails.
+    let mut devices_present: u32 = 0;
+    // SAFETY: rsmi_num_monitor_devices writes one u32 to the caller-provided
+    // pointer.
+    let ret = unsafe { get_count(&raw mut devices_present) };
+    if ret != RSMI_STATUS_SUCCESS {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] rsmi_num_monitor_devices returned {ret}");
+        return None;
+    }
+    if idx >= devices_present {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] device {idx} is not below the {devices_present} devices");
+        return None;
+    }
+
+    // A process that starts or exits during a listing fails one of its calls
+    // with a code that a fresh listing does not return: one retry, as the
+    // NVML listing does.
+    let rows = list_once(idx, *get_processes, *get_gpus, *get_by_device).or_else(|| {
+        #[cfg(feature = "debug-output")]
+        eprintln!("[ROCm debug] list_compute_processes(idx={idx}): retrying the listing once");
+        list_once(idx, *get_processes, *get_gpus, *get_by_device)
+    });
+
+    // End the session (rsmi_shut_down) only now that every call is done.
+    drop(session);
 
     rows
 }
