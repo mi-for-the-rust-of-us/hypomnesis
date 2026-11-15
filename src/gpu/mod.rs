@@ -511,9 +511,10 @@ pub(crate) fn dxgi_non_nvidia_devices(starting_index: u32) -> Vec<(GpuDeviceInfo
 ///    processes (active `CUDA` context).
 /// 3. `ROCm` SMI (Linux), after `NVML`. `rsmi_compute_process_info_get`
 ///    lists every `KFD` process on the host, `rsmi_compute_process_gpus_get`
-///    says which devices each uses, and
-///    `rsmi_compute_process_info_by_device_get` gives its bytes on the
-///    requested one; names come from `/proc/<pid>/comm` as for `NVML`.
+///    names the devices each has queues on, so a device's rows are the
+///    processes with a queue on it, and
+///    `rsmi_compute_process_info_by_device_get` gives their bytes there;
+///    names come from `/proc/<pid>/comm` as for `NVML`.
 ///    Compute-only, like `NVML`.
 /// 4. `PDH` (Windows primary, consumer `WDDM`). Reads
 ///    `\GPU Process Memory(<instance>)\Dedicated Usage` (→

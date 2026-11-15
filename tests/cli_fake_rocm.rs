@@ -138,8 +138,10 @@ impl FakeRocm {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // With the fake reporting no driver, `hmn` must see no GPU: one it
-        // still counts belongs to a real NVIDIA stack.
+        // With the fake failing `rsmi_init` with 8, which reads as no GPU
+        // only where neither `/dev/kfd` nor `/sys/module/amdgpu` exists,
+        // `hmn` must see no GPU: one it still counts belongs to a real NVIDIA
+        // stack.
         let probe = fake.hmn(&[], &[("FAKE_RSMI_INIT", "8")]);
         if probe.stdout.lines().any(|line| line.starts_with("GPU ")) {
             skip(test, "a real NVIDIA stack answers on this host");
@@ -269,9 +271,8 @@ fn ps_exits_2_with_the_reason_when_rocm_cannot_start() {
 
 /// A driver that is not there (`rsmi_init` returns `RSMI_STATUS_INIT_ERROR`,
 /// 8, on a host with neither `/dev/kfd` nor the `amdgpu` module: the `ROCm`
-/// userland alone) leaves no
-/// GPU process that could exist, so it reads as no GPU, not as "can't tell"
-/// the way any other code does. `hmn` says `no visible GPUs.` (exit `0`)
+/// userland alone) leaves no GPU process that could exist, so it reads as no
+/// GPU, not as "can't tell" the way any other code does. `hmn` says `no visible GPUs.` (exit `0`)
 /// and `hmn ps` says `(no GPU to list)` (exit `0`, `1` under
 /// `--exit-status`), as on a machine without an AMD driver. A library that
 /// starts and counts zero is a count: `--device 0` is out of range.

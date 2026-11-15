@@ -810,7 +810,8 @@ fn list_once(
 ///
 /// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
 /// whatever its owner or device, with `vram_usage` zero. For each PID,
-/// `rsmi_compute_process_gpus_get` says which devices it uses, and
+/// `rsmi_compute_process_gpus_get` names the devices it has queues on, so a
+/// device's rows are the processes with a queue on it, and
 /// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
 /// ([`rows_on_device`]).
 ///
@@ -823,8 +824,9 @@ fn list_once(
 /// itself: `RSMI_STATUS_INSUFFICIENT_SIZE` from a list call (a process
 /// started between its size and fill calls) or `RSMI_STATUS_NOT_SUPPORTED`
 /// from a per-PID read (a process exited while the library read it) fails
-/// the listing, and the whole listing is retried once ([`list_once`]), as
-/// `NVML`'s is.
+/// the listing. Like `nvml.rs`, this retries once, here the whole listing
+/// ([`list_once`]), because `ROCm` SMI reports neither the new count nor a
+/// process start or exit as such.
 ///
 /// Returns `None` when `ROCm` SMI cannot be loaded or started, a symbol does
 /// not resolve, any other call fails (the device count's included), a
@@ -868,8 +870,9 @@ pub(super) fn list_compute_processes(idx: u32) -> Option<Vec<(u32, u64)>> {
     }
 
     // A process that starts or exits during a listing fails one of its calls
-    // with a code that a fresh listing does not return: one retry, as the
-    // NVML listing does.
+    // with a code that a fresh listing does not return, and ROCm SMI reports
+    // neither the new count nor the start or exit as such: one retry of the
+    // whole listing, as nvml.rs retries once.
     let rows = list_once(idx, *get_processes, *get_gpus, *get_by_device).or_else(|| {
         #[cfg(feature = "debug-output")]
         eprintln!("[ROCm debug] list_compute_processes(idx={idx}): retrying the listing once");
