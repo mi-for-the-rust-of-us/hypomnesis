@@ -136,7 +136,7 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
 
     // ROCm SMI is asked only when NVML's count is not positive.
     #[cfg(all(target_os = "linux", feature = "rocm"))]
-    let nvml_count = if matches!(nvml_count, Ok(count) if count > 0) {
+    let backends_count = if matches!(nvml_count, Ok(count) if count > 0) {
         nvml_count
     } else {
         let rocm_count = match rocm::device_count() {
@@ -147,14 +147,17 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
         count_verdict(nvml_count, rocm_count)
     };
 
-    let nvml_failure = match nvml_count {
+    #[cfg(not(all(target_os = "linux", feature = "rocm")))]
+    let backends_count = nvml_count;
+
+    let backends_failure = match backends_count {
         Ok(count) => return Ok(count),
         Err(failure) => failure,
     };
 
     #[cfg(all(windows, feature = "dxgi"))]
     if let Some(count) = dxgi::device_count()
-        && dxgi_count_stands(count, nvml_failure.is_some())
+        && dxgi_count_stands(count, backends_failure.is_some())
     {
         return Ok(count);
     }
@@ -163,7 +166,7 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
     // counting via `nvidia-smi -L` is more brittle than NVML/DXGI and
     // adds a subprocess invocation for what's typically a metadata call.
 
-    Err(nvml_failure)
+    Err(backends_failure)
 }
 
 /// The device count of the Linux backends, `NVML` and `ROCm` SMI, each given
