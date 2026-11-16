@@ -634,26 +634,34 @@ enum DeviceRead {
 }
 
 /// The rows of one device's process listing: `(pid, used_bytes)` for each
-/// process whose device list (`rsmi_compute_process_gpus_get`) includes
-/// `idx`, with the bytes `by_device` reports for that PID on the device
+/// process with a queue on `idx` (its device list from
+/// `rsmi_compute_process_gpus_get` includes `idx`) or with `VRAM` on it
+/// (`by_device` reports more than 0 bytes), with the bytes `by_device`
+/// reports for that PID on the device
 /// (`rsmi_compute_process_info_by_device_get`).
 ///
-/// The list call's own `vram_usage` is zero and the per-PID total sums every
-/// device, so neither is a figure for one device. Every PID is checked,
-/// whoever owns it. `by_device` is asked only for PIDs on the device. A PID
-/// it reports [`DeviceRead::Gone`] has no row; `None` when it fails for any
-/// other reason, so a failed call is never an empty listing.
+/// A process gets its first queue only at its first work, so one that has
+/// allocated and not yet run anything has no queue on any device, and only
+/// its bytes show it is there. The list call's own `vram_usage` is zero and
+/// the per-PID total sums every device, so neither is a figure for one
+/// device. Every PID is checked, whoever owns it, and `by_device` is asked
+/// for each. A PID it reports [`DeviceRead::Gone`] has no row; `None` when
+/// it fails for any other reason, so a failed call is never an empty
+/// listing.
 fn rows_on_device(
     idx: u32,
     procs: &[(u32, Vec<u32>)],
     by_device: impl Fn(u32) -> DeviceRead,
 ) -> Option<Vec<(u32, u64)>> {
     let mut rows = Vec::new();
-    for &(pid, _) in procs.iter().filter(|(_, devices)| devices.contains(&idx)) {
-        match by_device(pid) {
-            DeviceRead::Bytes(bytes) => rows.push((pid, bytes)),
-            // EXPLICIT: the process exited after the host listing; it has no row.
-            DeviceRead::Gone => {}
+    for (pid, devices) in procs {
+        match by_device(*pid) {
+            DeviceRead::Bytes(bytes) if bytes > 0 || devices.contains(&idx) => {
+                rows.push((*pid, bytes));
+            }
+            // EXPLICIT: no queue and no bytes on this device, or the process
+            // exited after the host listing; either way it has no row.
+            DeviceRead::Bytes(_) | DeviceRead::Gone => {}
             DeviceRead::Failed => return None,
         }
     }
@@ -810,10 +818,10 @@ fn list_once(
 ///
 /// `rsmi_compute_process_info_get` lists every `KFD` process on the host,
 /// whatever its owner or device, with `vram_usage` zero. For each PID,
-/// `rsmi_compute_process_gpus_get` names the devices it has queues on, so a
-/// device's rows are the processes with a queue on it, and
-/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`
-/// ([`rows_on_device`]).
+/// `rsmi_compute_process_gpus_get` names the devices it has queues on, and
+/// `rsmi_compute_process_info_by_device_get` gives its bytes on `idx`. A
+/// device's rows are the processes with a queue on it or `VRAM` on it, with
+/// their `VRAM` there ([`rows_on_device`]).
 ///
 /// Both list calls follow the library's two-call size protocol: a null buffer
 /// returns the count, then a buffer of that many entries is filled.
@@ -1054,8 +1062,21 @@ mod tests {
         // One process on device 1, one whose device list lacks it: only the
         // first is kept, whoever owns either.
         let procs = [(4242, vec![0, 1]), (4343, vec![0])];
-        let rows = rows_on_device(1, &procs, |_| DeviceRead::Bytes(2_298_515_456));
+        let rows = rows_on_device(1, &procs, |pid| {
+            DeviceRead::Bytes(if pid == 4242 { 2_298_515_456 } else { 0 })
+        });
         assert_eq!(rows, Some(vec![(4242, 2_298_515_456)]));
+    }
+
+    #[test]
+    fn rows_on_device_keeps_vram_without_a_queue() {
+        // A process with no queue on the device and bytes there is kept; one
+        // with no queue and 0 bytes is not.
+        let procs = [(4242, vec![]), (4343, vec![])];
+        let rows = rows_on_device(0, &procs, |pid| {
+            DeviceRead::Bytes(if pid == 4242 { 2_147_483_648 } else { 0 })
+        });
+        assert_eq!(rows, Some(vec![(4242, 2_147_483_648)]));
     }
 
     #[test]
