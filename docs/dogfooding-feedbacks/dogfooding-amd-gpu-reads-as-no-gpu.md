@@ -118,8 +118,10 @@ from zero. In-job, ROCm's index is canonical: the `GPU` column of `hmn ps` shoul
 Each row is produced by the backend's acceptance run on a two-MI300X allocation: one process holding
 a 4 GiB `hipMalloc` on device 0, with `rocm-smi --showmeminfo vram` read before and during as the
 independent signal; the two-device row adds a second process holding 1 GiB on device 0 and 2 GiB on
-device 1, and the no-GPU row runs in an allocation granted no GPU. The result cell holds the
-command's captured stdout, stderr and exit status.
+device 1, and the no-GPU row runs in an allocation granted no GPU. The init-error rows load the
+fake library with `rsmi_init` returning 8 on that node, where `/dev/kfd` exists; the `hipMalloc`-only
+row holds 2 GiB on device 0 from a process that has run no GPU work, so it has no queue yet. The
+result cell holds the command's captured stdout, stderr and exit status.
 
 | Case | Command | Must hold | Result |
 |---|---|---|---|
@@ -128,7 +130,10 @@ command's captured stdout, stderr and exit status.
 | two MI300X, one holder on device 0 | `hmn ps --json` | the row's bytes equal `mem_usage` | `[{"pid":1678361,"name":"python3","used_bytes":4445999104,"shared_used_bytes":0,"device_index":0,"device_name":"AMD Instinct MI300X OAM","spilling":null,"paged":null,"shared_share":null}]`<br>`hmn: 1 GPU process found (4.1 GiB committed total).`<br>exit `0` |
 | library present but broken | `hmn ps` | exit `2`, an error line, not an empty table | `hmn: ps failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INTERNAL_EXCEPTION (6)`<br>`hmn: ps: no device could be queried, so nothing could be listed`<br>exit `2` |
 | library present but broken | `hmn` | exit `2`, an error line, not `no visible GPUs.` | `hmn: failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INTERNAL_EXCEPTION (6)`<br>exit `2` |
+| library present, init error, AMD driver present | `hmn ps` | exit `2`, an error line, not an empty table | `hmn: ps failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INIT_ERROR (8)`<br>`hmn: ps: no device could be queried, so nothing could be listed`<br>exit `2` |
+| library present, init error, AMD driver present | `hmn` | exit `2`, an error line, not `no visible GPUs.` | `hmn: failed to count devices: ROCm error: rsmi_init returned RSMI_STATUS_INIT_ERROR (8)`<br>exit `2` |
 | an allocation granted no GPU | `hmn` | `no visible GPUs.`, exit `0` | `hmn: no visible GPUs.`<br>exit `0` |
+| a process that has only called `hipMalloc` (2 GiB, device 0) | `hmn ps --json` | one row, device 0, its bytes there | `[{"pid":1944951,"name":"python3","used_bytes":2147483648,"shared_used_bytes":0,"device_index":0,"device_name":"AMD Instinct MI300X OAM","spilling":null,"paged":null,"shared_share":null}]`<br>`hmn: 1 GPU process found (2.0 GiB committed total).`<br>exit `0` |
 | two devices, a second process on both | `hmn ps` | `GPU` column carries ROCm's indexes, one row per device | `PID      NAME     VRAM     SHARED  GPU  DEVICE                   SPILL`<br>`1678361  python3  4.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a`<br>`1678481  python3  2.1 GiB  0 MiB   1    AMD Instinct MI300X OAM  n/a`<br>`1678481  python3  1.1 GiB  0 MiB   0    AMD Instinct MI300X OAM  n/a`<br>`hmn: 3 GPU processes found (7.4 GiB committed total).`<br>exit `0` |
 
 ## Confidence
