@@ -109,10 +109,12 @@ Reading the library on the same node settled the questions the report left open:
 - **The index is the library's enumeration index over the devices the process can see, `0..n`.**
   Scheduler numbers are never read, as for `NVML`: scoping a job to its devices comes from the OS.
 - **Processes are listed per device, like `NVML`.** The list call is host-wide and carries no bytes;
-  membership and bytes are per device. A device's rows are the processes with a queue on it, the
-  rule AMD SMI's per-device list follows: the PIDs whose `rsmi_compute_process_gpus_get` includes
-  it, each with its `rsmi_compute_process_info_by_device_get` figure there, whoever owns the
-  process. A device outside the process's view contributes no row. A listing that fails because a
+  membership and bytes are per device. A device's rows are the processes with a queue on it or
+  VRAM on it: the PIDs whose `rsmi_compute_process_gpus_get` includes it, and those whose
+  `rsmi_compute_process_info_by_device_get` figure there is above zero, each with that figure,
+  whoever owns the process. A process gets its first queue at its first work, so one that has only
+  allocated is listed by its bytes. A device a process neither has a queue on nor holds VRAM on
+  contributes no row. A listing that fails because a
   process started or exited during it is retried once, whole: like `nvml.rs`, one retry, because
   ROCm SMI reports neither the new count nor a process start or exit as such.
 - **No reserved bytes, no spill measurement.** `reserved_bytes` is `None`; the driver version is
@@ -179,7 +181,7 @@ cgroups) ticks, or, for a library-level row, the measurement that was taken ther
 | A host with the ROCm userland and no AMD driver is not broken | `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8) there, with neither `/dev/kfd` nor the `amdgpu` module (measured); `hmn` prints `no visible GPUs.` and exits `0` |
 | A job granted no GPU on an AMD node | `hmn` prints `no visible GPUs.` and exits `0` |
 | `hmn`, `hmn --json` | names the GPU, total, used and free, and the driver version; shows no reserved parenthetical; exit `0` |
-| `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with a queue on each device, with its VRAM there, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
+| `hmn ps`, `--json`, `--pid`, `--device`, `--min`, `--filter`, `--sort` | one row per process with a queue or VRAM on each device, with its VRAM there, VRAM within 1 MiB of `rocm-smi --showpids` and of the device-wide delta, NAME from `/proc`, `GPU` column carrying ROCm's index; a process on two devices shows each device's own figure |
 | `hmn watch` (PID, `--follow-new`, `--filter`, `--min`) | the same rows sampled over time; the spill line reads "not measurable" |
 | `hmn spill -- <cmd>` | runs the command and prints the "not measurable on this platform" note |
 | `hmn fits <size>` | exits `0`, `1` or `2` on the device's free VRAM |
