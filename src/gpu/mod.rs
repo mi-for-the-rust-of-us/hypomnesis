@@ -115,8 +115,8 @@ pub fn device_count() -> Result<u32> {
 /// ([`HypomnesisError::Rocm`]) can fail this way. [`device_count`] and
 /// [`bounds_check`] both walk the backends through here, so the bound an index
 /// is checked against is the count `hmn` shows. A `DXGI` count of zero does
-/// not stand in for a broken `NVML` ([`dxgi_count_stands`]); on Linux the two
-/// counts go through [`count_verdict`], `ROCm` SMI being asked only when `NVML`'s
+/// not stand in for a broken `NVML` (`dxgi_count_stands`); on Linux the two
+/// counts go through `count_verdict`, `ROCm` SMI being asked only when `NVML`'s
 /// count is not positive.
 #[allow(clippy::missing_const_for_fn)] // const only when no features are enabled (body collapses)
 fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
@@ -174,7 +174,7 @@ fn backend_count() -> std::result::Result<u32, Option<HypomnesisError>> {
 /// for a library that loaded but could not start or count. A positive count
 /// stands, `NVML`'s first. Otherwise the first broken detail stands, `NVML`'s
 /// first, so a zero never stands over a broken library from either side (the
-/// rule of [`dxgi_count_stands`]). Otherwise a zero stands, and otherwise
+/// rule of `dxgi_count_stands`). Otherwise a zero stands, and otherwise
 /// `Err(None)`.
 #[cfg(any(all(target_os = "linux", feature = "rocm"), test))]
 fn count_verdict(
@@ -209,7 +209,7 @@ const fn dxgi_count_stands(count: u32, nvml_broken: bool) -> bool {
 /// The error for "no backend reported a count": the backend's own error
 /// ([`HypomnesisError::Nvml`] or [`HypomnesisError::Rocm`]) when its library
 /// loaded but could not start or count, the first such error on Linux where
-/// [`count_verdict`] names `NVML`'s first, else [`HypomnesisError::NoGpuSource`]
+/// `count_verdict` names `NVML`'s first, else [`HypomnesisError::NoGpuSource`]
 /// (see [`device_count`] for what each means to a caller).
 #[must_use]
 fn no_count_error(backend_failure: Option<HypomnesisError>) -> HypomnesisError {
