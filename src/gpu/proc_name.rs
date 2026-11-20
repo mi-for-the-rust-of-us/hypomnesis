@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Linux process names for the `NVML` process listing and for
-//! [`crate::process_name`].
+//! Linux process names for the `NVML` and `ROCm` SMI process listings and
+//! for [`crate::process_name`].
 //!
 //! The kernel's `comm` (`/proc/<pid>/comm`) is world-readable but cut to
 //! [`COMM_MAX_BYTES`] bytes, so an executable named

@@ -241,7 +241,7 @@ and the other platforms honestly cannot exhibit or measure it:
 
 | Platform | Why not |
 |---|---|
-| Linux | Normal `CUDA` gets an **OOM** rather than silent paging; `NVML` has no shared-residency field (managed/`UVM` migration is per-allocation, not per-process) |
+| Linux | Normal `CUDA` gets an **OOM** rather than silent paging; `NVML` has no shared-residency field (managed/`UVM` migration is per-allocation, not per-process). On AMD GPUs the `ROCm SMI` backend reads no shared-residency figure either, so spill is not measured |
 | macOS / Apple Silicon | `UMA` — one physical pool; there is nothing to spill *into* |
 
 `SpillTracker` still compiles and constructs everywhere (portable consumers
@@ -345,7 +345,7 @@ fit").
 
 | Command | `0` | `1` | `2` |
 |---|---|---|---|
-| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, one whose kernel driver is not loaded, or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`), or another query failed (`hmn: <reason>`, which exited `1` before v0.2.15); nothing on stdout, `--json` included |
+| `hmn` | at least one GPU listed (any it could not read named on stderr); or `no visible GPUs.` (no NVIDIA driver, one whose kernel driver is not loaded, on Linux no `ROCm` library (`librocm_smi64.so.1`), or one that counts none) | — | no GPU readable (`N GPU(s) enumerated but none readable.`), or the GPUs could not be counted (`failed to count devices: NVML error: …`), or another query failed (`hmn: <reason>`, which exited `1` before v0.2.15); nothing on stdout, `--json` included |
 | `hmn ps` | the listing, even empty, devices that failed skipped | with `--exit-status` only: nothing listed, every device tried answered, and no process the filters could match was unreadable — including `(no GPU to list)` | a `--device` that cannot be listed; every device failed; the devices could not be counted; with `--exit-status`, nothing listed and a device was skipped or a process the filters could match was unreadable |
 | `hmn watch` | no spill observed | spill observed | the watched device could not be listed, nothing to auto-select, or an invalid flag combination |
 
@@ -356,7 +356,7 @@ line means the listing went on without that device. With no suffix it is a
 `--device N` that could not be listed, and the exit is `2`. The text after
 the colon says why: `device index N out of range (have M devices)` for an
 index past the count, anything else for a device that failed (on Linux
-usually `no GPU measurement source available (NVML and nvidia-smi both failed
+usually `no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed
 or are disabled)`). For a log scan, look for the `failed to query device`
 prefix, then read the reason: the `(skipped)` suffix alone misses a fatal
 `--device` failure. Look for `failed to count devices` too: that line, from
@@ -377,7 +377,7 @@ process on a GPU, so `hmn` reads those as no GPU (`no visible GPUs.`, exit
 ## On a multi-GPU node, or in a Slurm job, which GPU is `--device N`?
 
 `N` is the device's index in NVML's order, the order `nvidia-smi` numbers
-GPUs in. `hmn ps` lists every device, and its GPU column (since v0.2.15)
+GPUs in (on AMD GPUs, `ROCm SMI`'s order). `hmn ps` lists every device, and its GPU column (since v0.2.15)
 gives each row's index, so the rows of two GPUs of one model read apart.
 `hmn watch` watches one device, `--device` (default `0`): when the watched
 device does not hold the work, it says which one does, both for an explicit
@@ -385,8 +385,8 @@ PID held elsewhere (`pid=N holds 10.4 GiB on device 1, not device 0 … —
 re-run with --device 1`) and for an auto-selection that finds nothing
 (`device 5 has a match (pid …): re-run with --device 5`).
 
-**Inside a GPU-isolated Slurm job** (`ConstrainDevices=yes`), NVML sees only
-the job's GPUs and numbers them from `0`. A job given physical GPU 1 sees it
+**Inside a GPU-isolated Slurm job** (`ConstrainDevices=yes`), NVML (on AMD GPUs,
+`ROCm SMI`) sees only the job's GPUs and numbers them from `0`. A job given physical GPU 1 sees it
 as device `0`: its processes read `"device_index":0` inside the job and
 `"device_index":1` from outside it, so captures from inside and outside a job
 cannot be joined on `device_index`. A job given **no** GPU has no device to
@@ -434,6 +434,12 @@ named rather than papered over:
   `0xFFFFFFFFFFFFFFFF` for every process's memory via `NVML`; hypomnesis
   detects the sentinel (and `used > total` corruption) per-row and falls back
   to `nvidia-smi` rather than reporting garbage.
+
+On AMD GPUs (Linux), the per-process figure is
+`rsmi_compute_process_info_by_device_get`, read per device (`rocm-smi --showpids`
+prints the sum over devices). On an 8×MI300X node with ROCm 7.2.4 it came
+within 1 MiB of the device's own used-VRAM delta. `ROCm SMI` reports no
+driver-reserved figure, so `reserved_bytes` is `None`.
 
 Also remember the *semantic* differences across backends: Windows `PDH`
 `used_bytes` is commit; macOS `graphics_footprint` and the shared column are

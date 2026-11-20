@@ -3,7 +3,7 @@ name = "hypomnesis"
 version = "0.2.15"
 edition = "2024"
 authors = ["Eric Jacopin"]
-description = "External RAM and VRAM measurement for Rust processes (process RSS plus per-process and device-wide GPU memory: Windows DXGI + NVML + PDH, Linux NVML, macOS libSystem + Metal, with nvidia-smi fallback)."
+description = "External RAM and VRAM measurement for Rust processes (process RSS plus per-process and device-wide GPU memory: Windows DXGI + NVML + PDH, Linux NVML + AMD ROCm SMI, macOS libSystem + Metal, with nvidia-smi fallback)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mi-for-the-rust-of-us/hypomnesis"
 homepage = "https://github.com/mi-for-the-rust-of-us/hypomnesis"
@@ -51,8 +51,11 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
 objc2 = { version = "0.6", optional = true }
 
 [features]
-default = ["nvml", "nvidia-smi-fallback", "dxgi", "pdh", "metal", "cli"]
+default = ["nvml", "rocm", "nvidia-smi-fallback", "dxgi", "pdh", "metal", "cli"]
 nvml = ["dep:libloading"]
+# `rocm` (Linux-only effect) reads AMD GPUs through `librocm_smi64.so.1`, loaded
+# at run time with `libloading` like `nvml`. Asked after NVML; no-op off-Linux.
+rocm = ["dep:libloading"]
 nvidia-smi-fallback = []
 dxgi = ["dep:windows"]
 # `pdh` (Windows-only effect) reads `\GPU Process Memory(*)\Dedicated Usage`

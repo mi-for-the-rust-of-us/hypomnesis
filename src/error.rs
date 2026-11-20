@@ -5,7 +5,7 @@
 /// Errors that can occur during a `hypomnesis` measurement.
 ///
 /// `#[non_exhaustive]`: new variants will be added as new backends are introduced
-/// (e.g., AMD `ROCm` SMI). Patch-release-safe.
+/// (the most recent is [`Self::Rocm`], for AMD `ROCm` SMI on Linux). Patch-release-safe.
 ///
 /// # `Display` vs structured fields
 ///
@@ -14,7 +14,8 @@
 /// the consumer is content with the default rendering. Structured fields
 /// ([`Self::DeviceIndexOutOfRange`]'s `index` / `count`,
 /// [`Self::ProcessListDenied`]'s `denied`, the inner `String` of
-/// [`Self::Nvml`] / [`Self::Dxgi`] / [`Self::Pdh`] / [`Self::NvidiaSmi`]) are
+/// [`Self::Nvml`] / [`Self::Rocm`] / [`Self::Dxgi`] / [`Self::Pdh`] /
+/// [`Self::NvidiaSmi`]) are
 /// the **canonical source** for any consumer that wants to:
 ///
 /// - Localize the message to a non-English language.
@@ -55,6 +56,18 @@ pub enum HypomnesisError {
     #[error("NVML error: {0}")]
     Nvml(String),
 
+    /// The `ROCm` SMI library (`librocm_smi64`) loaded but could not start
+    /// or count, and no other backend reported a positive count (since
+    /// v0.2.16): its init
+    /// or device-count call is missing from the library, or returned an
+    /// error. The text names the call and the return code. Unlike
+    /// [`Self::NoGpuSource`], it does not mean "no GPU here": the GPUs may
+    /// be there, unreadable. Not this error but `NoGpuSource` (or a count
+    /// of zero): a `ROCm` SMI library that does not load at all, and one
+    /// that reports no GPU.
+    #[error("ROCm error: {0}")]
+    Rocm(String),
+
     /// `DXGI` query failed (factory creation, adapter enumeration,
     /// `IDXGIAdapter3` cast, or interface call).
     #[error("DXGI error: {0}")]
@@ -87,12 +100,13 @@ pub enum HypomnesisError {
     /// Returned when every GPU backend compiled for the platform failed (or
     /// was disabled by feature flags) for a single query, unless the `NVML`
     /// library loaded but could not start or count, which is
-    /// [`Self::Nvml`] instead (since v0.2.15). From [`crate::device_count`]
+    /// [`Self::Nvml`] instead (since v0.2.15), or, on Linux, the `ROCm` SMI
+    /// library did, which is [`Self::Rocm`] instead (since v0.2.16). From [`crate::device_count`]
     /// it means no count source is installed, which a caller may read as
     /// zero GPUs. The message names the platform's backends: `NVML`,
     /// `DXGI`, `PDH` and `nvidia-smi` on Windows; `Metal`, `NVML` and
-    /// `nvidia-smi` on macOS; `NVML` and `nvidia-smi` elsewhere, Linux
-    /// included (since v0.2.15; the Windows list before). On macOS,
+    /// `nvidia-smi` on macOS; `NVML`, `ROCm` SMI and `nvidia-smi` on Linux;
+    /// `NVML` and `nvidia-smi` elsewhere. On macOS,
     /// [`crate::gpu_processes`] and [`crate::gpu_process_listing`] also
     /// return it when the caller's sandbox refuses `proc_listpids` and no
     /// `sysctl` listing can stand in, for example when `KERN_PROC_ALL` is
@@ -112,7 +126,13 @@ pub enum HypomnesisError {
         )
     )]
     #[cfg_attr(
-        not(any(target_os = "macos", windows)),
+        target_os = "linux",
+        error(
+            "no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed or are disabled)"
+        )
+    )]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", windows)),
         error(
             "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"
         )
@@ -166,9 +186,14 @@ mod tests {
             text,
             "no GPU measurement source available (NVML, DXGI, PDH, and nvidia-smi all failed or are disabled)"
         );
-        // Linux, and any other platform, names only the two backends it
-        // compiles, none of the Windows-only ones.
-        #[cfg(not(any(target_os = "macos", windows)))]
+        // Linux names its three backends, none of the Windows-only ones.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            text,
+            "no GPU measurement source available (NVML, ROCm, and nvidia-smi all failed or are disabled)"
+        );
+        // Any other platform names only the two backends it compiles.
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         assert_eq!(
             text,
             "no GPU measurement source available (NVML and nvidia-smi both failed or are disabled)"

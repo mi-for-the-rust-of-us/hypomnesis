@@ -1438,7 +1438,7 @@ pub fn run_watch(
     let mut watched = first.pids;
     // The other devices, listed once, at attach, and only when the watched
     // device does not hold the work: an explicit PID missing from it, or
-    // nothing selected. Each listing opens an NVML session.
+    // nothing selected. Each listing opens an NVML (or ROCm SMI) session.
     let probe = probe_pids(&selection.explicit, &first_rows, &denied);
     let elsewhere = if probe.is_empty() && !watched.is_empty() {
         Vec::new()
