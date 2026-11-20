@@ -65,6 +65,8 @@ The parity claim is Linux only and is written down row by row in the README, in
   hosts are unsupported.
 - **`hmn` names a failed `ROCm` count** (`src/bin/hmn/summary.rs`) — `hmn: failed to count devices:
   ROCm error: …`, as for `NVML`.
+- **`Cargo.toml` drops `homepage`**, which repeated `repository`; Rust 1.100's cargo warns that
+  `package.homepage is redundant with package.repository`. crates.io still links the repository.
 ### Fixed
 
 - **The `argv[0]` name test no longer fails on Ubuntu 26.04** (`src/gpu/proc_name.rs`) —
