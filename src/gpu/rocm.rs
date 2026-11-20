@@ -251,7 +251,7 @@ fn classify_init_failure(code: u32, driver_present: impl FnOnce() -> bool) -> In
 }
 
 /// Whether the host has an AMD driver: `/dev/kfd` or `/sys/module/amdgpu`
-/// exists. Without both, no AMD GPU process can exist on the host.
+/// exists. With neither, no AMD GPU process can exist on the host.
 #[must_use]
 fn amd_driver_present() -> bool {
     std::path::Path::new("/dev/kfd").exists() || std::path::Path::new("/sys/module/amdgpu").exists()

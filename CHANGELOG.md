@@ -24,13 +24,24 @@ The parity claim is Linux only and is written down row by row in the README, in
   through `libloading` and reads device name, total, used and free memory and the driver version
   (`rsmi_version_str_get`) per device, the memory a process holds on a device
   (`rsmi_compute_process_info_by_device_get`), and the compute processes on each device
-  (`rsmi_compute_process_info_get` with `rsmi_compute_process_gpus_get`, compute-only, names from
-  `/proc`). On Linux the dispatchers ask it after `NVML` and before `nvidia-smi`. `reserved_bytes`
-  is `None` and spill is not measurable, as on any Linux source that lacks them.
+  (compute-only, names from `/proc`). Only the total and used reads are required; the name, the
+  driver version and the caller's own figure are `None` when they cannot be read. On Linux the
+  dispatchers ask it after `NVML` and before `nvidia-smi`. `reserved_bytes` is `None` and spill is
+  not measurable, as on any Linux source that lacks them.
+- **The `ROCm` SMI process listing** (`src/gpu/rocm.rs`) — `rsmi_compute_process_info_get` lists
+  every compute process on the host, and a device's rows are the processes with a queue on it
+  (`rsmi_compute_process_gpus_get`) or more than 0 bytes on it
+  (`rsmi_compute_process_info_by_device_get`), with their bytes there. A process gets its first
+  queue only with its first work, so one that has only called `hipMalloc` is listed by its bytes
+  (measured on an MI300X). A listing that fails because a process started or exited during it is
+  read once more, as the `NVML` listing is read once more when its buffer is too small.
 - **`GpuQuerySource::Rocm`** (`src/snapshot.rs`) — the `source` of rows read through `ROCm` SMI.
 - **`HypomnesisError::Rocm`** (`src/error.rs`) — a `ROCm` SMI library that loads but fails to start
   or answer, reading `ROCm error: …`. `hmn` and `hmn ps` both exit `2` on it, with nothing on
-  stdout, as they do on `HypomnesisError::Nvml`.
+  stdout, as they do on `HypomnesisError::Nvml`. `rsmi_init` returns `RSMI_STATUS_INIT_ERROR` (8)
+  for any failed initialization, so that code reads as no GPU only on a host with neither
+  `/dev/kfd` nor `/sys/module/amdgpu` (the `ROCm` userland without an AMD driver); with either one
+  present it is this error.
 - **The `rocm` feature**, in the default set (`Cargo.toml`) — depends on `libloading` only, like
   `nvml`; a no-op off Linux, and a host without ROCm is unaffected.
 - **`tests/cli_fake_rocm.rs` and `tests/live_rocm.rs`** — a fake `ROCm` SMI library
@@ -54,7 +65,8 @@ The parity claim is Linux only and is written down row by row in the README, in
   hosts are unsupported.
 - **`hmn` names a failed `ROCm` count** (`src/bin/hmn/summary.rs`) — `hmn: failed to count devices:
   ROCm error: …`, as for `NVML`.
-
+- **`Cargo.toml` drops `homepage`**, which repeated `repository`; Rust 1.100's cargo warns that
+  `package.homepage is redundant with package.repository`. crates.io still links the repository.
 ### Fixed
 
 - **The `argv[0]` name test no longer fails on Ubuntu 26.04** (`src/gpu/proc_name.rs`) —
