@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-11-20
+
 > *AMD GPUs on Linux, read the way NVIDIA GPUs are.*
 
 Adds a `ROCm` SMI backend, so `hmn` and the library read AMD GPUs on Linux where they read an
@@ -1219,7 +1221,8 @@ function bodies are placeholders that compile and pass clippy under
 - **`README.md`** — project overview with badges (CI, crates.io, docs.rs, MSRV, license, unsafe-deny, NVIDIA NVML+DXGI), install, usage, capability matrix, feature flags, license, and development conventions. Mirrors the structure used in [`anamnesis/README.md`](https://github.com/PCfVW/anamnesis/blob/main/README.md).
 - **`[package.metadata.docs.rs]`** — docs.rs builds with `all-features = true` and targets both `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`, exposing the Windows-only `dxgi` module on docs.rs alongside the cross-platform `nvml` path.
 
-[Unreleased]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.15...HEAD
+[Unreleased]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.16...HEAD
+[0.2.16]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/mi-for-the-rust-of-us/hypomnesis/compare/v0.2.12...v0.2.13
