@@ -2,8 +2,10 @@
 
 > *Measure the AMD GPU the way `hmn` measures the NVIDIA one, and say where the two differ.*
 
-**Status: in progress.** The scope was settled on 2026-11-09 (see *Decisions taken*); no version
-bump until release.
+**Status: ✅ shipped 2026-11-20.** The scope was settled on 2026-11-09 (see *Decisions taken*); it
+landed through [PR #10](https://github.com/mi-for-the-rust-of-us/hypomnesis/pull/10) by
+contributor [@LittleCoinCoin](https://github.com/LittleCoinCoin), after a review against the ROCm SMI 7.2.4 source changed
+three rules: code 8 from `rsmi_init`, the per-device listing, and its retry.
 
 ---
 
